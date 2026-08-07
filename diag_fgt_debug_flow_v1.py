@@ -17,6 +17,13 @@ Install manually if preferred:
 
 from __future__ import annotations
 
+# This script is a standalone FortiGate troubleshooting tool. The design is split
+# into three layers so the GUI never has to think about low-level SSH details:
+# 1. Validation and command-building helpers near the top of the file.
+# 2. The SshDebugSession class, which manages one SSH session per target host.
+# 3. The Tkinter-based DebugFlowSshGui, which collects user input and launches
+# the worker threads that run the SSH sessions.
+
 import importlib.util
 import queue
 import re
@@ -259,6 +266,9 @@ def active_filters(args: DebugFlowSshArgs) -> list[str]:
     return values
 
 
+# The worker session object represents one SSH connection to a single FortiGate.
+# It owns the Paramiko client/channel, sends the debug-flow commands, captures
+# the live output stream, and writes a final text report after the session ends.
 class SshDebugSession:
     def __init__(self, host: str, args: DebugFlowSshArgs, logger: Callable[[str, str], None]) -> None:
         if paramiko is None:
@@ -426,6 +436,9 @@ class SshDebugSession:
             self.log(LOG_INFO, "SSH debug session complete.")
 
 
+# The GUI layer is intentionally thin. It collects user input, validates it,
+# converts it into a DebugFlowSshArgs structure, and then launches one worker
+# thread per host so the Tk event loop remains responsive while SSH work runs.
 class DebugFlowSshGui:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
