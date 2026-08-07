@@ -4,15 +4,15 @@ This repository contains a small set of standalone utilities for network adminis
 
 ## Main tool
 
-- Script: [FortiNet/FortiOS/diag_fgt_debug_flow_v2.py](FortiNet/FortiOS/diag_fgt_debug_flow_v2.py)
+- Script: [FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v2.py](FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v2.py)
 - Purpose: run FortiOS debug-flow traces over SSH, apply optional filters, and capture the session output for later review.
 - Runtime requirements: Python with Tkinter available and the `paramiko` package installed.
-- Previous version: [FortiNet/FortiOS/diag_fgt_debug_flow_v1.py](FortiNet/FortiOS/diag_fgt_debug_flow_v1.py) is kept as-is for reference; v2 supersedes it (see "Known follow-ups" below).
+- Previous version: [FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v1.py](FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v1.py) is kept as-is for reference; v2 supersedes it (see "Known follow-ups" below).
 
 ## How to run
 
 ```bash
-python3 FortiNet/FortiOS/diag_fgt_debug_flow_v2.py
+python3 FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v2.py
 ```
 
 The GUI collects:
@@ -31,10 +31,12 @@ Hover over any field, checkbox, or button in the GUI for an explanation of what 
 - The helper functions near the top of the script are intentionally separate from the GUI code so the validation and filter-building logic can be reused or tested independently.
 - SSH host keys are trusted on first connection and saved to the script's own `known_hosts` file (OpenSSH format, next to the script), so repeat runs verify against the saved key instead of trusting blindly every time. A host key that changes later raises a clear error instead of being silently accepted.
 - Trace count is tracked by watching `trace_id=` in the live output rather than relying solely on the FortiGate's own counter, since FortiGate trace IDs do not start at 0 and a single trace_id can span multiple lines. As soon as any one target host reaches its requested trace count, every other still-running host in that run is stopped too, and each host's output file records whether it stopped on its own count or because another host reached its count first.
+- SSH output is reassembled into complete lines before it's scanned, since a single line can be split across two SSH receive chunks; scanning each raw chunk independently could silently miss the trace count entirely.
+- Each run (one Start click) also produces a single `run_report_<label>_<timestamp>.txt` alongside the per-host files, containing only program-level events (connections, stop reasons, errors, warnings) for every host in that run - no raw trace output.
 
 ## Known follow-ups
 
-Resolved in v2 ([diag_fgt_debug_flow_v2.py](FortiNet/FortiOS/diag_fgt_debug_flow_v2.py)):
+Resolved in v2 ([diag_fgt_debug_flow_v2.py](FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v2.py)):
 
 - **Packet count now stops the flow reliably.** Each session watches the live output for `trace_id=`, remembers the first trace_id it sees, and stops right after the Nth trace_id's lines finish printing.
 - **Trace-count completion now propagates to all target firewalls.** As soon as any one host reaches its own trace count, every other still-running host in that run is stopped too, with the reason recorded per host.

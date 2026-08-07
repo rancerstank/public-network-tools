@@ -2,7 +2,7 @@
 diag_fgt_debug_flow_v2.py
 
 Standalone FortiGate Debug Flow utility using SSH instead of the FortiOS REST API.
-Supersedes diag_fgt_debug_flow_v1.py in this same folder.
+Supersedes diag_fgt_debug_flow_v1.py in archive folder.
 
 Adds on top of v1:
 - Reliable auto-stop on trace count: watches the live output for trace_id= and
@@ -21,6 +21,12 @@ Adds on top of v1:
   radio button that enables/disables the fields that do not apply.
 - Per-filter "Not" checkboxes on every range filter that send FortiOS's
   'diagnose debug flow filter negate <field>' to invert that filter.
+- Trace output is now assembled from full lines only (buffered across SSH
+  recv() chunks), fixing trace_id detection being missed when a chunk
+  boundary split a trace_id= line in two.
+- One run report per Start click (run_report_<label>_<timestamp>.txt),
+  covering every host in that run: connections, stop reasons, errors, and
+  warnings, with the raw trace output left out.
 
 Carried over from v1:
 - Python requirements check.
@@ -83,6 +89,12 @@ MAX_TIMER_SECONDS = 24 * 60 * 60
 LOG_INFO = "info"
 LOG_WARN = "warning"
 LOG_ERROR = "error"
+
+# Log "kind" - distinguishes program/meta events (connections, stop reasons,
+# errors, warnings) from raw FortiOS trace passthrough, so the run report can
+# include the former and exclude the latter.
+LOG_KIND_PROGRAM = "program"
+LOG_KIND_TRACE = "trace"
 
 
 class DebugFlowError(Exception):
@@ -412,6 +424,7 @@ class SshDebugSession:
         self.target_trace_id: int | None = None
         self.trace_count_reached = False
         self.stop_reason = "n/a"
+        self._line_buffer = ""
 
     def log(self, level: str, message: str) -> None:
         self.logger(level, f"[{self.host}] {message}")
@@ -518,6 +531,30 @@ class SshDebugSession:
             self.trace_count_reached = True
             self.coordinator.claim_trace_stop(self.host)
 
+    def _handle_complete_line(self, line: str) -> None:
+        stripped = line.rstrip("\r")
+        if stripped.strip():
+            self.logger(LOG_INFO, f"[{self.host}] {stripped}", LOG_KIND_TRACE)
+            self.note_trace_line(stripped)
+
+    def _consume_for_lines(self, data: str) -> None:
+        # SSH channel data arrives in raw byte chunks with no guarantee a
+        # chunk boundary lands on a line break. Splitting each chunk on its
+        # own (the old behavior) could cut a "trace_id=123" line in half
+        # across two recv() calls, so neither fragment matched the regex and
+        # trace-count detection silently never fired. Buffering across calls
+        # and only processing complete lines fixes that.
+        self._line_buffer += data
+        parts = self._line_buffer.split("\n")
+        self._line_buffer = parts.pop()
+        for line in parts:
+            self._handle_complete_line(line)
+
+    def flush_line_buffer(self) -> None:
+        line, self._line_buffer = self._line_buffer, ""
+        if line:
+            self._handle_complete_line(line)
+
     def drain_channel(self) -> None:
         if not self.channel:
             return
@@ -529,10 +566,7 @@ class SshDebugSession:
                 if not data:
                     break
                 self.output_chunks.append(data)
-                for line in data.splitlines():
-                    if line.strip():
-                        self.logger(LOG_INFO, f"[{self.host}] {line}")
-                        self.note_trace_line(line)
+                self._consume_for_lines(data)
             except socket.timeout:
                 break
             except Exception:
@@ -615,6 +649,7 @@ class SshDebugSession:
             self.cleanup_remote_debug()
             time.sleep(0.5)
             self.drain_channel()
+            self.flush_line_buffer()
         except Exception as exc:
             self.error_text = str(exc)
             self.log(LOG_ERROR, str(exc))
@@ -739,9 +774,10 @@ FIELD_HELP = {
         "access has been moved to a non-standard port on the target devices."
     ),
     "output_dir": (
-        "Folder where the result .txt files are saved. One file is written per host per run, named "
-        "'<host>_ssh_debug_flow_<label>_<timestamp>.txt'. The folder is created automatically if it "
-        "does not already exist."
+        "Folder where result files are saved: one '<host>_ssh_debug_flow_<label>_<timestamp>.txt' per "
+        "host with its full trace output, plus one 'run_report_<label>_<timestamp>.txt' per run "
+        "summarizing connections, stop reasons, errors, and warnings across all hosts (no raw trace "
+        "output). The folder is created automatically if it does not already exist."
     ),
     "browse_button": "Open a folder picker to choose the Output Directory instead of typing a path.",
     "num_packets": (
@@ -857,6 +893,7 @@ class DebugFlowSshGui:
         self.start_button = None
         self.stop_button = None
         self.req_button = None
+        self.report_lines: list[str] = []
         self.build_ui()
         self.drain_log_queue()
         self.root.after(250, self.check_requirements_startup)
@@ -1079,14 +1116,16 @@ class DebugFlowSshGui:
     def clear_log(self):
         self.log_text.delete("1.0", "end")
 
-    def logger(self, level, message):
-        self.log_queue.put((level, message))
+    def logger(self, level, message, kind=LOG_KIND_PROGRAM):
+        stamp = datetime.now().strftime("%H:%M:%S")
+        if kind != LOG_KIND_TRACE:
+            self.report_lines.append(f"{stamp} ({level}) {message}")
+        self.log_queue.put((level, message, stamp))
 
     def drain_log_queue(self):
         try:
             while True:
-                level, message = self.log_queue.get_nowait()
-                stamp = datetime.now().strftime("%H:%M:%S")
+                level, message, stamp = self.log_queue.get_nowait()
                 self.log_text.insert("end", f"{stamp} ({level}) {message}\n")
                 self.log_text.see("end")
         except queue.Empty:
@@ -1167,6 +1206,7 @@ class DebugFlowSshGui:
         coordinator = RunCoordinator()
         self.sessions = [SshDebugSession(host, args, self.logger, coordinator) for host in args.hosts]
         self.threads = []
+        self.report_lines = []
         self.set_running_state(True)
         self.logger(LOG_INFO, f"Starting SSH debug flow on {len(self.sessions)} host(s).")
         def manager():
@@ -1179,9 +1219,29 @@ class DebugFlowSshGui:
                     thread.join()
             finally:
                 self.logger(LOG_INFO, "All SSH debug sessions are complete.")
+                try:
+                    report_path = self.write_run_report(args)
+                    self.logger(LOG_INFO, f"Run report written: {report_path}")
+                except Exception as exc:
+                    self.logger(LOG_ERROR, f"Failed to write run report: {exc}")
                 self.root.after(0, lambda: self.set_running_state(False))
         self.manager_thread = threading.Thread(target=manager, daemon=True)
         self.manager_thread.start()
+
+    def write_run_report(self, args: DebugFlowSshArgs) -> Path:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        path = args.output_dir / f"run_report_{sanitize_component(args.file_label, 'run')}_{timestamp_token()}.txt"
+        lines = [
+            "=== FortiGate SSH Debug Flow Run Report ===",
+            f"Hosts: {', '.join(args.hosts)}",
+            f"Trace Count Requested: {args.num_packets}",
+            f"Timer Seconds: {args.timer_seconds}",
+            "",
+            "=== Program Log (connections, stop reasons, errors, warnings - no raw trace output) ===",
+            *self.report_lines,
+        ]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
 
     def stop(self):
         if not self.sessions:
