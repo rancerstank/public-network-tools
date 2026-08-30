@@ -1941,7 +1941,7 @@ FIELD_HELP = {
         "Exports console window to JSON, including Live Output Filters"
     ),
     "save_text_output": (
-        "Saves standard FortiOS debug-flow console output to a plain text file (.txt) in the output directory."
+        "Saves standard FortiOS debug-flow console output to a plain text file (.txt) in the output directory. It will save one text file per firewall if ran on multiple hosts."
     ),
     "save_json_output": (
         "Automatically parses and exports structured JSON trace data (.json) containing 5-tuples, VDOM, routing, policy rules, and verdicts."
@@ -1997,11 +1997,11 @@ class DebugFlowSshGui:
         self.vars[name] = var
         return var
 
-    def add_labeled_entry(self, parent, row, label, name, value="", show=None, col=0, width=60, tooltip=None):
+    def add_labeled_entry(self, parent, row, label, name, value="", show=None, col=0, width=30, tooltip=None):
         label_widget = ttk.Label(parent, text=label)
-        label_widget.grid(row=row, column=col, sticky="w", padx=4, pady=2)
+        label_widget.grid(row=row, column=col, sticky="w", padx=(4, 6), pady=2)
         entry = ttk.Entry(parent, textvariable=self.str_var(name, value), show=show, width=width)
-        entry.grid(row=row, column=col + 1, sticky="ew", padx=4, pady=2)
+        entry.grid(row=row, column=col + 1, sticky="w", padx=(0, 4), pady=2)
         if tooltip:
             ToolTip(label_widget, tooltip)
             ToolTip(entry, tooltip)
@@ -2029,96 +2029,145 @@ class DebugFlowSshGui:
 
         req = ttk.LabelFrame(self.content_frame, text="Python Requirements")
         req.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
-        req.columnconfigure(0, weight=1)
-        self.req_status = ttk.Label(req, text="Checking requirements...")
-        self.req_status.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        req.columnconfigure(1, weight=1)
         self.req_button = ttk.Button(req, text="Check / Install Requirements", command=self.install_requirements_clicked)
-        self.req_button.grid(row=0, column=1, sticky="e", padx=4, pady=2)
+        self.req_button.grid(row=0, column=0, sticky="w", padx=4, pady=2)
         ToolTip(self.req_button, FIELD_HELP["req_button"])
+        self.req_status = ttk.Label(req, text="Checking requirements...")
+        self.req_status.grid(row=0, column=1, sticky="w", padx=8, pady=2)
 
         conn = ttk.LabelFrame(self.content_frame, text="SSH Connection")
         conn.grid(row=1, column=0, sticky="ew", padx=4, pady=4)
         conn.columnconfigure(1, weight=1)
-        self.add_labeled_entry(conn, 0, "Hostnames or IPs (Separated by commas)", "hosts", tooltip=FIELD_HELP["hosts"])
-        self.add_labeled_entry(conn, 1, "SSH Username", "username", tooltip=FIELD_HELP["username"])
+        self.add_labeled_entry(conn, 0, "Hostnames or IPs (Separated by commas)", "hosts", width=42, tooltip=FIELD_HELP["hosts"])
+        self.add_labeled_entry(conn, 1, "SSH Username", "username", width=42, tooltip=FIELD_HELP["username"])
 
         ttk.Label(conn, text="Authentication Method").grid(row=2, column=0, sticky="w", padx=4, pady=2)
         auth_method_var = self.str_var("auth_method", "password")
+        auth_frame = ttk.Frame(conn)
+        auth_frame.grid(row=2, column=1, sticky="w", padx=4, pady=2)
         password_radio = ttk.Radiobutton(
-            conn, text="Password", variable=auth_method_var, value="password", command=self.update_auth_method_state
+            auth_frame, text="Password", variable=auth_method_var, value="password", command=self.update_auth_method_state
         )
-        password_radio.grid(row=2, column=1, sticky="w", padx=4, pady=2)
+        password_radio.pack(side="left", padx=(0, 20))
         key_radio = ttk.Radiobutton(
-            conn, text="Private Key", variable=auth_method_var, value="key", command=self.update_auth_method_state
+            auth_frame, text="Private Key", variable=auth_method_var, value="key", command=self.update_auth_method_state
         )
-        key_radio.grid(row=2, column=2, sticky="w", padx=4, pady=2)
+        key_radio.pack(side="left", padx=0)
         ToolTip(password_radio, FIELD_HELP["auth_method"])
         ToolTip(key_radio, FIELD_HELP["auth_method"])
 
-        self.password_entry = self.add_labeled_entry(conn, 3, "SSH Password", "password", show="*", tooltip=FIELD_HELP["password"])
-        self.key_path_entry = self.add_labeled_entry(conn, 4, "Private Key File", "key_path", tooltip=FIELD_HELP["key_path"])
-        self.key_browse_button = ttk.Button(conn, text="Browse", command=self.browse_key_file)
-        self.key_browse_button.grid(row=4, column=2, sticky="w", padx=4, pady=2)
+        self.password_entry = self.add_labeled_entry(conn, 3, "SSH Password", "password", show="*", width=42, tooltip=FIELD_HELP["password"])
+        
+        # Private Key File + Browse button side-by-side
+        ttk.Label(conn, text="Private Key File").grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        key_frame = ttk.Frame(conn)
+        key_frame.grid(row=4, column=1, sticky="w", padx=4, pady=2)
+        self.key_path_entry = ttk.Entry(key_frame, textvariable=self.str_var("key_path"), width=42)
+        self.key_path_entry.pack(side="left", padx=(0, 6))
+        self.key_browse_button = ttk.Button(key_frame, text="Browse", command=self.browse_key_file)
+        self.key_browse_button.pack(side="left")
+        ToolTip(self.key_path_entry, FIELD_HELP["key_path"])
         ToolTip(self.key_browse_button, FIELD_HELP["key_browse_button"])
+
         self.key_passphrase_entry = self.add_labeled_entry(
-            conn, 5, "Key Passphrase (if encrypted)", "key_passphrase", show="*", tooltip=FIELD_HELP["key_passphrase"]
+            conn, 5, "Key Passphrase (if encrypted)", "key_passphrase", show="*", width=42, tooltip=FIELD_HELP["key_passphrase"]
         )
 
-        self.add_labeled_entry(conn, 6, "SSH Port", "ssh_port", str(DEFAULT_SSH_PORT), width=12, tooltip=FIELD_HELP["ssh_port"])
-        self.add_labeled_entry(conn, 7, "Output Directory", "output_dir", str(DEFAULT_OUTPUT_DIR), tooltip=FIELD_HELP["output_dir"])
-        browse_button = ttk.Button(conn, text="Browse", command=self.browse_output_dir)
-        browse_button.grid(row=7, column=2, sticky="w", padx=4, pady=2)
+        self.add_labeled_entry(conn, 6, "SSH Port", "ssh_port", str(DEFAULT_SSH_PORT), width=10, tooltip=FIELD_HELP["ssh_port"])
+        
+        # Output Directory + Browse button side-by-side
+        ttk.Label(conn, text="Output Directory").grid(row=7, column=0, sticky="w", padx=4, pady=2)
+        out_frame = ttk.Frame(conn)
+        out_frame.grid(row=7, column=1, sticky="w", padx=4, pady=2)
+        out_entry = ttk.Entry(out_frame, textvariable=self.str_var("output_dir", str(DEFAULT_OUTPUT_DIR)), width=42)
+        out_entry.pack(side="left", padx=(0, 6))
+        browse_button = ttk.Button(out_frame, text="Browse", command=self.browse_output_dir)
+        browse_button.pack(side="left")
+        ToolTip(out_entry, FIELD_HELP["output_dir"])
         ToolTip(browse_button, FIELD_HELP["browse_button"])
         
-        # Add strict host-key checking option (enabled by default)
+        # Add strict host-key checking option and Known Hosts Manager button
         strict_check_cb = ttk.Checkbutton(conn, text="Strict Host-Key Checking", variable=self.bool_var("strict_host_key_checking", True))
-        strict_check_cb.grid(row=8, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+        strict_check_cb.grid(row=8, column=0, sticky="w", padx=4, pady=2)
         ToolTip(strict_check_cb, FIELD_HELP["strict_host_key_checking"])
         
-        # Add Known Hosts Manager button
         known_hosts_button = ttk.Button(conn, text="Known Hosts Manager", command=self.open_known_hosts_manager)
-        known_hosts_button.grid(row=8, column=2, sticky="w", padx=4, pady=2)
+        known_hosts_button.grid(row=8, column=1, sticky="w", padx=4, pady=2)
         ToolTip(known_hosts_button, FIELD_HELP["known_hosts_manager_button"])
         
         self.update_auth_method_state()
 
         opts = ttk.LabelFrame(self.content_frame, text="Debug Flow Options")
         opts.grid(row=2, column=0, sticky="ew", padx=4, pady=4)
-        for col in range(4):
-            opts.columnconfigure(col, weight=1)
-        self.add_labeled_entry(opts, 0, "Trace Count", "num_packets", "100", col=0, width=20, tooltip=FIELD_HELP["num_packets"])
-        self.add_labeled_entry(opts, 0, "Timer Seconds", "timer_seconds", "0", col=2, width=20, tooltip=FIELD_HELP["timer_seconds"])
-        self.add_labeled_entry(opts, 1, "Add label to filename", "file_label", "run", col=0, width=30, tooltip=FIELD_HELP["file_label"])
-        show_fn_cb = ttk.Checkbutton(opts, text="Show function-name", variable=self.bool_var("show_function_name", True))
-        show_fn_cb.grid(row=1, column=2, sticky="w", padx=4, pady=2)
+        
+        # Row 0: Trace Count
+        row0 = ttk.Frame(opts)
+        row0.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        tc_lbl = ttk.Label(row0, text="Trace Count", width=14, anchor="w")
+        tc_lbl.pack(side="left", padx=(0, 4))
+        tc_entry = ttk.Entry(row0, textvariable=self.str_var("num_packets", "100"), width=20)
+        tc_entry.pack(side="left")
+        ToolTip(tc_lbl, FIELD_HELP["num_packets"])
+        ToolTip(tc_entry, FIELD_HELP["num_packets"])
+        
+        # Row 1: Timer Seconds
+        row1 = ttk.Frame(opts)
+        row1.grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        ts_lbl = ttk.Label(row1, text="Timer Seconds", width=14, anchor="w")
+        ts_lbl.pack(side="left", padx=(0, 4))
+        ts_entry = ttk.Entry(row1, textvariable=self.str_var("timer_seconds", "0"), width=20)
+        ts_entry.pack(side="left")
+        ToolTip(ts_lbl, FIELD_HELP["timer_seconds"])
+        ToolTip(ts_entry, FIELD_HELP["timer_seconds"])
+        
+        # Row 2: Filename Label
+        row2 = ttk.Frame(opts)
+        row2.grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        fl_lbl = ttk.Label(row2, text="Filename Label", width=14, anchor="w")
+        fl_lbl.pack(side="left", padx=(0, 4))
+        fl_entry = ttk.Entry(row2, textvariable=self.str_var("file_label", "run"), width=20)
+        fl_entry.pack(side="left")
+        ToolTip(fl_lbl, FIELD_HELP["file_label"])
+        ToolTip(fl_entry, FIELD_HELP["file_label"])
+        
+        # Row 3: Display Checkboxes (below input fields and above file output checkboxes)
+        display_frame = ttk.Frame(opts)
+        display_frame.grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        show_fn_cb = ttk.Checkbutton(display_frame, text="Show function-name", variable=self.bool_var("show_function_name", True))
+        show_fn_cb.pack(side="left", padx=(0, 16))
         ToolTip(show_fn_cb, FIELD_HELP["show_function_name"])
-        show_iprope_cb = ttk.Checkbutton(opts, text="Show iprope", variable=self.bool_var("show_iprope", True))
-        show_iprope_cb.grid(row=1, column=3, sticky="w", padx=4, pady=2)
+        show_iprope_cb = ttk.Checkbutton(display_frame, text="Show iprope", variable=self.bool_var("show_iprope", True))
+        show_iprope_cb.pack(side="left", padx=(0, 16))
         ToolTip(show_iprope_cb, FIELD_HELP["show_iprope"])
-        console_ts_cb = ttk.Checkbutton(opts, text="Console timestamp", variable=self.bool_var("console_timestamp", True))
-        console_ts_cb.grid(row=2, column=2, sticky="w", padx=4, pady=2)
+        console_ts_cb = ttk.Checkbutton(display_frame, text="Console timestamp", variable=self.bool_var("console_timestamp", True))
+        console_ts_cb.pack(side="left", padx=0)
         ToolTip(console_ts_cb, FIELD_HELP["console_timestamp"])
 
-        self.text_out_cb = ttk.Checkbutton(opts, text="Save Text Output (.txt)", variable=self.bool_var("save_text_output", True))
-        self.text_out_cb.grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        # Row 4: Output File Format Options
+        output_frame = ttk.Frame(opts)
+        output_frame.grid(row=4, column=0, sticky="w", padx=4, pady=(4, 2))
+        
+        self.text_out_cb = ttk.Checkbutton(output_frame, text="Save Text Output (.txt)", variable=self.bool_var("save_text_output", True))
+        self.text_out_cb.pack(side="left", padx=(0, 16))
         ToolTip(self.text_out_cb, FIELD_HELP["save_text_output"])
 
         self.json_out_cb = ttk.Checkbutton(
-            opts, text="Save JSON Output (.json)", variable=self.bool_var("save_json_output", True), command=self.update_json_output_state
+            output_frame, text="Save JSON Output (.json)", variable=self.bool_var("save_json_output", True), command=self.update_json_output_state
         )
-        self.json_out_cb.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+        self.json_out_cb.pack(side="left", padx=(0, 16))
         ToolTip(self.json_out_cb, FIELD_HELP["save_json_output"])
 
         self.json_separate_cb = ttk.Checkbutton(
-            opts, text="Separate (Per-Host) JSON", variable=self.bool_var("save_json_separate", True)
+            output_frame, text="Separate (Per-Host) JSON", variable=self.bool_var("save_json_separate", True)
         )
-        self.json_separate_cb.grid(row=3, column=2, sticky="w", padx=4, pady=2)
+        self.json_separate_cb.pack(side="left", padx=(0, 16))
         ToolTip(self.json_separate_cb, FIELD_HELP["save_json_separate"])
 
         self.json_combined_cb = ttk.Checkbutton(
-            opts, text="Combined Multi-Host JSON", variable=self.bool_var("save_json_combined", True)
+            output_frame, text="Combined Multi-Host JSON", variable=self.bool_var("save_json_combined", True)
         )
-        self.json_combined_cb.grid(row=3, column=3, sticky="w", padx=4, pady=2)
+        self.json_combined_cb.pack(side="left", padx=0)
         ToolTip(self.json_combined_cb, FIELD_HELP["save_json_combined"])
 
         self.update_json_output_state()
@@ -2151,24 +2200,25 @@ class DebugFlowSshGui:
             ("Dst Port", "dport_from", "dport_to", "dport"),
         ]):
             filter_label = ttk.Label(filter_fields, text=label)
-            filter_label.grid(row=row, column=0, sticky="w", padx=4, pady=2)
-            entry_from = ttk.Entry(filter_fields, textvariable=self.str_var(start_name), width=18)
-            entry_from.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
-            ttk.Label(filter_fields, text="to").grid(row=row, column=2, sticky="w", padx=4, pady=2)
-            entry_to = ttk.Entry(filter_fields, textvariable=self.str_var(end_name), width=18)
-            entry_to.grid(row=row, column=3, sticky="ew", padx=4, pady=2)
+            filter_label.grid(row=row, column=0, sticky="w", padx=(4, 6), pady=2)
+            entry_from = ttk.Entry(filter_fields, textvariable=self.str_var(start_name), width=15)
+            entry_from.grid(row=row, column=1, sticky="w", padx=(0, 4), pady=2)
+            to_label = ttk.Label(filter_fields, text="to")
+            to_label.grid(row=row, column=2, sticky="w", padx=(2, 4), pady=2)
+            entry_to = ttk.Entry(filter_fields, textvariable=self.str_var(end_name), width=15)
+            entry_to.grid(row=row, column=3, sticky="w", padx=(0, 4), pady=2)
             negate_cb = ttk.Checkbutton(filter_fields, text="Not", variable=self.bool_var(f"{help_key}_negate", False))
-            negate_cb.grid(row=row, column=4, sticky="w", padx=4, pady=2)
+            negate_cb.grid(row=row, column=4, sticky="w", padx=(6, 4), pady=2)
             help_text = FIELD_HELP[help_key]
             ToolTip(filter_label, help_text)
             ToolTip(entry_from, help_text)
             ToolTip(entry_to, help_text)
             ToolTip(negate_cb, FIELD_HELP["negate"])
         proto_row = 6
-        proto_label = ttk.Label(filter_fields, text="Protocol Number 1=ICMP, 6=TCP, 17=UDP")
-        proto_label.grid(row=proto_row, column=0, sticky="w", padx=4, pady=2)
-        proto_entry = ttk.Entry(filter_fields, textvariable=self.str_var("proto"), width=18)
-        proto_entry.grid(row=proto_row, column=1, sticky="ew", padx=4, pady=2)
+        proto_label = ttk.Label(filter_fields, text="Proto #")
+        proto_label.grid(row=proto_row, column=0, sticky="w", padx=(4, 6), pady=2)
+        proto_entry = ttk.Entry(filter_fields, textvariable=self.str_var("proto"), width=10)
+        proto_entry.grid(row=proto_row, column=1, sticky="w", padx=(0, 4), pady=2)
         ToolTip(proto_label, FIELD_HELP["proto"])
         ToolTip(proto_entry, FIELD_HELP["proto"])
 
