@@ -58,4 +58,25 @@ Resolved in v2:
 
 Possible future ideas (not yet implemented):
 
-- A GUI "Compare Traces" tool to side-by-side view traces from different hosts to spot divergent behavior. 
+- A GUI "Compare Traces" tool to side-by-side view traces from different hosts to spot divergent behavior.
+- Advanced Multi-Flow JSON Analysis and Visualization engine for troubleshooting complex packet life-cycles across large multi-firewall transit paths.
+
+## License & Commercial Tiers
+
+This project is licensed under a **Source-Available / Fair Source Commercial Tiered License**. See [LICENSE.md](LICENSE.md) for full terms.
+
+### Free Individual Use
+The software is **100% free** for individuals, students, lab testing, and single independent network consultants.
+
+### Commercial & Enterprise Tiers
+Commercial deployment across organizations with multiple named users requires an annual commercial subscription:
+
+| Tier | Active Users / Named Seats | Licensing Requirement | Inquiry Method |
+| :--- | :--- | :--- | :--- |
+| **Individual / Free** | 1 User (Personal, Lab, Solo Consultant) | **Free** | No license required |
+| **Small Business** | 1 – 25 Named Users | Annual Subscription | GitHub Discussions / Issues |
+| **Medium Business** | 26 – 100 Named Users | Annual Subscription | GitHub Discussions / Issues |
+| **Large Business** | 101 – 500 Named Users | Annual Subscription | GitHub Discussions / Issues |
+| **Enterprise** | 501+ Named Users | Custom Enterprise Agreement | GitHub Discussions / Issues |
+
+For purchasing inquiries or commercial license quotes, please open a thread in **GitHub Discussions** or submit an inquiry via **GitHub Issues**.
