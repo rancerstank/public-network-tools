@@ -218,6 +218,10 @@ class DebugFlowSshArgs:
     show_iprope: bool = True
     console_timestamp: bool = True
     strict_host_key_checking: bool = True
+    save_text_output: bool = True
+    save_json_output: bool = True
+    save_json_separate: bool = True
+    save_json_combined: bool = True
     timeout: int = DEFAULT_TIMEOUT_SECONDS
 
 
@@ -496,9 +500,10 @@ def parse_debug_flow_text(raw_text: str, host: str | None = None) -> dict[str, A
             
         gd = m.groupdict()
         trace_id = int(gd["trace_id"])
+        trace_key = (line_host, trace_id)
         
-        if trace_id not in traces_dict:
-            traces_dict[trace_id] = {
+        if trace_key not in traces_dict:
+            traces_dict[trace_key] = {
                 "trace_id": trace_id,
                 "host": line_host,
                 "first_timestamp": gd.get("timestamp"),
@@ -522,7 +527,7 @@ def parse_debug_flow_text(raw_text: str, host: str | None = None) -> dict[str, A
                 "steps": [],
             }
             
-        trace = traces_dict[trace_id]
+        trace = traces_dict[trace_key]
         msg = gd.get("msg") or ""
         
         step = {
@@ -974,6 +979,10 @@ def save_session_profile(
         "show_iprope": args.show_iprope,
         "console_timestamp": args.console_timestamp,
         "strict_host_key_checking": args.strict_host_key_checking,
+        "save_text_output": args.save_text_output,
+        "save_json_output": args.save_json_output,
+        "save_json_separate": args.save_json_separate,
+        "save_json_combined": args.save_json_combined,
     }
     
     envelope = encrypt_full_profile(raw_profile_data, passphrase)
@@ -1603,23 +1612,25 @@ class SshDebugSession:
         if self.error_text:
             lines.extend(["", "=== Error ===", self.error_text])
         session_output = "".join(self.output_chunks)
-        path.write_text("\n".join(lines), encoding="utf-8")
-        self.result_file = path
-        self.log(LOG_INFO, f"Result file created: {path}")
+        if self.args.save_text_output:
+            path.write_text("\n".join(lines), encoding="utf-8")
+            self.result_file = path
+            self.log(LOG_INFO, f"Result file created: {path}")
 
-        # Automatically export structured JSON alongside text output
-        try:
-            json_path = path.with_suffix(".json")
-            structured_data = parse_debug_flow_text(session_output, host=self.host)
-            structured_data["metadata"]["elapsed_seconds"] = round(elapsed, 2)
-            structured_data["metadata"]["trace_count_requested"] = self.args.num_packets
-            structured_data["metadata"]["trace_count_reached"] = self.trace_count_reached
-            structured_data["metadata"]["stop_reason"] = self.stop_reason
-            structured_data["metadata"]["active_filters"] = active_filters(self.args)
-            json_path.write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
-            self.log(LOG_INFO, f"Structured JSON trace file created: {json_path}")
-        except Exception as json_exc:
-            self.log(LOG_WARNING, f"Could not generate JSON trace export: {json_exc}")
+        # Automatically export structured JSON alongside text output if enabled
+        if self.args.save_json_output and self.args.save_json_separate:
+            try:
+                json_path = path.with_suffix(".json")
+                structured_data = parse_debug_flow_text(session_output, host=self.host)
+                structured_data["metadata"]["elapsed_seconds"] = round(elapsed, 2)
+                structured_data["metadata"]["trace_count_requested"] = self.args.num_packets
+                structured_data["metadata"]["trace_count_reached"] = self.trace_count_reached
+                structured_data["metadata"]["stop_reason"] = self.stop_reason
+                structured_data["metadata"]["active_filters"] = active_filters(self.args)
+                json_path.write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
+                self.log(LOG_INFO, f"Structured JSON trace file created: {json_path}")
+            except Exception as json_exc:
+                self.log(LOG_WARNING, f"Could not generate JSON trace export: {json_exc}")
 
         return path
 
@@ -1927,9 +1938,19 @@ FIELD_HELP = {
         "Remove the active filter and restore all live log lines."
     ),
     "export_json_button": (
-        "Parses the live debug flow output into structured JSON format (extracting VDOM, protocol, "
-        "source/destination IPs and ports, interfaces, routing decisions, policy matches, SNAT/DNAT, "
-        "and packet verdicts) and exports it to a .json file for programmatic analysis."
+        "Exports console window to JSON, including Live Output Filters"
+    ),
+    "save_text_output": (
+        "Saves standard FortiOS debug-flow console output to a plain text file (.txt) in the output directory."
+    ),
+    "save_json_output": (
+        "Automatically parses and exports structured JSON trace data (.json) containing 5-tuples, VDOM, routing, policy rules, and verdicts."
+    ),
+    "save_json_separate": (
+        "Generates an individual structured JSON file for each target firewall in the output directory."
+    ),
+    "save_json_combined": (
+        "Generates a single aggregated JSON trace file combining all target firewalls when running on multiple hosts."
     ),
 }
 
@@ -1951,6 +1972,10 @@ class DebugFlowSshGui:
         self.start_button = None
         self.stop_button = None
         self.req_button = None
+        self.text_out_cb = None
+        self.json_out_cb = None
+        self.json_separate_cb = None
+        self.json_combined_cb = None
         self.report_lines: list[str] = []
         
         # Filter state
@@ -2073,6 +2098,30 @@ class DebugFlowSshGui:
         console_ts_cb = ttk.Checkbutton(opts, text="Console timestamp", variable=self.bool_var("console_timestamp", True))
         console_ts_cb.grid(row=2, column=2, sticky="w", padx=4, pady=2)
         ToolTip(console_ts_cb, FIELD_HELP["console_timestamp"])
+
+        self.text_out_cb = ttk.Checkbutton(opts, text="Save Text Output (.txt)", variable=self.bool_var("save_text_output", True))
+        self.text_out_cb.grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        ToolTip(self.text_out_cb, FIELD_HELP["save_text_output"])
+
+        self.json_out_cb = ttk.Checkbutton(
+            opts, text="Save JSON Output (.json)", variable=self.bool_var("save_json_output", True), command=self.update_json_output_state
+        )
+        self.json_out_cb.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+        ToolTip(self.json_out_cb, FIELD_HELP["save_json_output"])
+
+        self.json_separate_cb = ttk.Checkbutton(
+            opts, text="Separate (Per-Host) JSON", variable=self.bool_var("save_json_separate", True)
+        )
+        self.json_separate_cb.grid(row=3, column=2, sticky="w", padx=4, pady=2)
+        ToolTip(self.json_separate_cb, FIELD_HELP["save_json_separate"])
+
+        self.json_combined_cb = ttk.Checkbutton(
+            opts, text="Combined Multi-Host JSON", variable=self.bool_var("save_json_combined", True)
+        )
+        self.json_combined_cb.grid(row=3, column=3, sticky="w", padx=4, pady=2)
+        ToolTip(self.json_combined_cb, FIELD_HELP["save_json_combined"])
+
+        self.update_json_output_state()
 
         filters = ttk.LabelFrame(self.content_frame, text="Filters")
         filters.grid(row=3, column=0, sticky="ew", padx=4, pady=4)
@@ -2364,9 +2413,25 @@ class DebugFlowSshGui:
         if not file_path:
             return
             
-        full_text = "\n".join(f"{stamp} ({level}) {msg}" for level, msg, stamp in self.all_log_lines)
+        # Collect lines reflecting active live output filters
+        lines_to_export = []
+        for level, msg, stamp in self.all_log_lines:
+            should_include = True
+            if self.current_regex_filter:
+                matches = self.current_regex_filter.matches(msg)
+                if self.filter_mode == "show":
+                    should_include = matches
+                elif self.filter_mode == "hide":
+                    should_include = not matches
+            if should_include:
+                lines_to_export.append(f"{stamp} ({level}) {msg}")
+                
+        full_text = "\n".join(lines_to_export)
         try:
             structured_data = parse_debug_flow_text(full_text)
+            if self.current_regex_filter and self.filter_mode:
+                structured_data["metadata"]["live_filter_applied"] = self.vars.get("regex_filter_pattern", tk.StringVar()).get().strip()
+                structured_data["metadata"]["live_filter_mode"] = self.filter_mode
             Path(file_path).write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
             count = structured_data["metadata"]["total_traces"]
             self.logger(LOG_INFO, f"Exported {count} trace(s) to JSON: {file_path}")
@@ -2423,8 +2488,15 @@ class DebugFlowSshGui:
         # Protocol filter
         self.vars["proto"].set(str(profile_data.get("proto", "")) if profile_data.get("proto") else "")
         
-        # Update auth method UI state
+        # Output options
+        self.vars["save_text_output"].set(profile_data.get("save_text_output", True))
+        self.vars["save_json_output"].set(profile_data.get("save_json_output", True))
+        self.vars["save_json_separate"].set(profile_data.get("save_json_separate", True))
+        self.vars["save_json_combined"].set(profile_data.get("save_json_combined", True))
+
+        # Update UI states
         self.update_auth_method_state()
+        self.update_json_output_state()
 
     def _apply_filter_mode(self, mode: str) -> None:
         pattern = self.vars.get("regex_filter_pattern", tk.StringVar()).get().strip()
@@ -2525,6 +2597,15 @@ class DebugFlowSshGui:
         self.key_browse_button.configure(state="normal" if is_key else "disabled")
         self.key_passphrase_entry.configure(state="normal" if is_key else "disabled")
 
+    def update_json_output_state(self):
+        """Enable or disable JSON sub-options (Separate and Combined) based on the master JSON checkbox."""
+        is_json = bool(self.vars.get("save_json_output", tk.BooleanVar(value=True)).get())
+        state = "normal" if is_json else "disabled"
+        if hasattr(self, "json_separate_cb") and self.json_separate_cb:
+            self.json_separate_cb.configure(state=state)
+        if hasattr(self, "json_combined_cb") and self.json_combined_cb:
+            self.json_combined_cb.configure(state=state)
+
     def clear_log(self):
         self.log_text.delete("1.0", "end")
         self.all_log_lines = []
@@ -2622,6 +2703,10 @@ class DebugFlowSshGui:
             show_iprope=bool(self.vars["show_iprope"].get()),
             console_timestamp=bool(self.vars["console_timestamp"].get()),
             strict_host_key_checking=bool(self.vars["strict_host_key_checking"].get()),
+            save_text_output=bool(self.vars.get("save_text_output", tk.BooleanVar(value=True)).get()),
+            save_json_output=bool(self.vars.get("save_json_output", tk.BooleanVar(value=True)).get()),
+            save_json_separate=bool(self.vars.get("save_json_separate", tk.BooleanVar(value=True)).get()),
+            save_json_combined=bool(self.vars.get("save_json_combined", tk.BooleanVar(value=True)).get()),
         )
 
     def set_running_state(self, running):
@@ -2670,11 +2755,21 @@ class DebugFlowSshGui:
                     thread.join()
             finally:
                 self.logger(LOG_INFO, "All SSH debug sessions are complete.")
-                try:
-                    report_path = self.write_run_report(args)
-                    self.logger(LOG_INFO, f"Run report written: {report_path}")
-                except Exception as exc:
-                    self.logger(LOG_ERROR, f"Failed to write run report: {exc}")
+                if args.save_text_output:
+                    try:
+                        report_path = self.write_run_report(args)
+                        self.logger(LOG_INFO, f"Run report written: {report_path}")
+                    except Exception as exc:
+                        self.logger(LOG_ERROR, f"Failed to write run report: {exc}")
+                
+                # If multiple hosts were targeted, automatically generate a combined JSON trace export if enabled
+                if len(self.sessions) > 1 and args.save_json_output and args.save_json_combined:
+                    try:
+                        combined_json_path = self.write_combined_json(args)
+                        self.logger(LOG_INFO, f"Combined multi-host JSON trace file written: {combined_json_path}")
+                    except Exception as exc:
+                        self.logger(LOG_ERROR, f"Failed to write combined JSON trace file: {exc}")
+
                 self.root.after(0, lambda: self.set_running_state(False))
         self.manager_thread = threading.Thread(target=manager, daemon=True)
         self.manager_thread.start()
@@ -2692,6 +2787,48 @@ class DebugFlowSshGui:
             *self.report_lines,
         ]
         path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+
+    def write_combined_json(self, args: DebugFlowSshArgs) -> Path:
+        """Generate a single combined JSON trace export aggregating all targeted hosts."""
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        path = args.output_dir / f"combined_ssh_debug_flow_{sanitize_component(args.file_label, 'run')}_{timestamp_token()}.json"
+        
+        all_traces: list[dict[str, Any]] = []
+        hosts_summary: dict[str, Any] = {}
+        
+        for session in self.sessions:
+            session_output = "".join(session.output_chunks)
+            parsed = parse_debug_flow_text(session_output, host=session.host)
+            traces = parsed.get("traces", [])
+            all_traces.extend(traces)
+            
+            elapsed = session.ended_at - session.started_at if session.ended_at and session.started_at else 0.0
+            hosts_summary[session.host] = {
+                "elapsed_seconds": round(elapsed, 2),
+                "trace_count_captured": len(traces),
+                "trace_count_reached": session.trace_count_reached,
+                "stop_reason": session.stop_reason,
+                "error": session.error_text or None,
+            }
+            
+        combined_payload = {
+            "metadata": {
+                "generator": "diag_fgt_debug_flow_v3",
+                "exported_at": datetime.now().isoformat(),
+                "mode": "multi_host_combined",
+                "hosts": args.hosts,
+                "total_hosts": len(args.hosts),
+                "total_traces": len(all_traces),
+                "trace_count_requested": args.num_packets,
+                "timer_seconds": args.timer_seconds,
+                "active_filters": active_filters(args),
+                "hosts_summary": hosts_summary,
+            },
+            "traces": all_traces,
+        }
+        
+        path.write_text(json.dumps(combined_payload, indent=2), encoding="utf-8")
         return path
 
     def stop(self):
