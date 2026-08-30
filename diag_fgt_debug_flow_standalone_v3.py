@@ -47,6 +47,13 @@ Dependency:
 
 Install manually if preferred:
     py -m pip install --upgrade paramiko
+
+License:
+    Copyright (c) 2026 RancerStank. All rights reserved.
+    Licensed under the Fair Source / Commercial Tiered License.
+    - Free for individual, educational, and single-consultant use.
+    - Multi-user business/enterprise use requires an annual commercial subscription tier.
+    - See LICENSE.md for complete terms and commercial inquiry details.
 """
 
 from __future__ import annotations
