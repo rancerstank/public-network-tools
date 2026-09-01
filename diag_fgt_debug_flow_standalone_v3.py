@@ -6,11 +6,14 @@ Supersedes diag_fgt_debug_flow_v2.py in archive folder.
 
 Adds on top of v2:
 - Loads host keys from both local known_hosts and ~/.ssh/known_hosts.
-- Strict host-key checking mode toggle.
+- Strict host-key checking mode toggle and interactive Host Key Verification Wizard.
 - Known Hosts Manager dialog for viewing and removing known host entries.
-- Per-host color-coded live log output.
+- Per-host color-coded live log output on a dark console terminal.
+- Live output Boolean & Regex filter chaining (AND/OR/NOT/parentheses).
+- Structured JSON trace export (Per-Host and Combined Multi-Host).
 - Fully encrypted session profiles: all network topology, hostnames, IPs, ports,
   filter rules, and credentials are 100% encrypted with AES-256-GCM (PBKDF2-HMAC-SHA256).
+- Standardized cross-platform os.path and lightweight file I/O helpers.
 
 Carried over from v2 & v1:
 - Reliable auto-stop on trace count: watches the live output for trace_id= and
@@ -80,7 +83,6 @@ import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from ipaddress import ip_address
-from pathlib import Path
 from typing import Callable, Any
 
 try:
@@ -101,9 +103,9 @@ REQUIRED_PACKAGES = {
 paramiko = None
 AESGCM = None
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
-KNOWN_HOSTS_PATH = SCRIPT_DIR / "known_hosts"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+KNOWN_HOSTS_PATH = os.path.join(SCRIPT_DIR, "known_hosts")
 DEFAULT_SSH_PORT = 22
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_TIMER_SECONDS = 24 * 60 * 60
@@ -119,6 +121,21 @@ LOG_ERROR = "error"
 # include the former and exclude the latter.
 LOG_KIND_PROGRAM = "program"
 LOG_KIND_TRACE = "trace"
+
+
+def _read_text(filepath: str, encoding: str = "utf-8") -> str:
+    """Read full text content of a file."""
+    with open(filepath, "r", encoding=encoding) as f:
+        return f.read()
+
+
+def _write_text(filepath: str, content: str, encoding: str = "utf-8") -> None:
+    """Write text content to a file, automatically creating parent directories if needed."""
+    parent_dir = os.path.dirname(filepath)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    with open(filepath, "w", encoding=encoding) as f:
+        f.write(content)
 
 
 class DebugFlowError(Exception):
@@ -201,7 +218,7 @@ class DebugFlowSshArgs:
     num_packets: int = 100
     timer_seconds: int = 0
     file_label: str = "run"
-    output_dir: Path = DEFAULT_OUTPUT_DIR
+    output_dir: str = DEFAULT_OUTPUT_DIR
     addr_from: str | None = None
     addr_to: str | None = None
     addr_negate: bool = False
@@ -624,14 +641,12 @@ def parse_debug_flow_text(raw_text: str, host: str | None = None) -> dict[str, A
     }
 
 
-def export_traces_to_json(raw_text: str, output_path: str | Path | None = None, host: str | None = None) -> str:
+def export_traces_to_json(raw_text: str, output_path: str | None = None, host: str | None = None) -> str:
     """Parse trace output and serialize to JSON, optionally saving to a file."""
     data = parse_debug_flow_text(raw_text, host=host)
     json_str = json.dumps(data, indent=2)
     if output_path is not None:
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json_str, encoding="utf-8")
+        _write_text(output_path, json_str)
     return json_str
 
 
@@ -649,14 +664,16 @@ def persist_host_key(hostname: str, key: paramiko.PKey) -> None:
     """
     with _known_hosts_lock:
         merged = paramiko.HostKeys()
-        if KNOWN_HOSTS_PATH.exists():
+        if os.path.exists(KNOWN_HOSTS_PATH):
             try:
-                merged.load(str(KNOWN_HOSTS_PATH))
+                merged.load(KNOWN_HOSTS_PATH)
             except Exception:
                 pass
         merged.add(hostname, key.get_name(), key)
-        KNOWN_HOSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        merged.save(str(KNOWN_HOSTS_PATH))
+        parent_dir = os.path.dirname(KNOWN_HOSTS_PATH)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        merged.save(KNOWN_HOSTS_PATH)
 
 
 def compute_key_fingerprints(key: paramiko.PKey) -> tuple[str, str]:
@@ -697,7 +714,7 @@ class TrustOnFirstUsePolicy:
         self.logger(
             LOG_WARN,
             f"New SSH host key for {hostname} trusted on first connection and "
-            f"saved to {KNOWN_HOSTS_PATH.name}: {key.get_name()} {sha256_fp}",
+            f"saved to {os.path.basename(KNOWN_HOSTS_PATH)}: {key.get_name()} {sha256_fp}",
         )
 
 
@@ -748,7 +765,7 @@ class InteractiveStrictHostKeyPolicy:
             persist_host_key(hostname, key)
             self.logger(
                 LOG_INFO,
-                f"SSH host key for {hostname} ({key_name} {sha256_fp}) trusted and saved to {KNOWN_HOSTS_PATH.name}.",
+                f"SSH host key for {hostname} ({key_name} {sha256_fp}) trusted and saved to {os.path.basename(KNOWN_HOSTS_PATH)}.",
             )
         elif req.decision == "trust_once":
             client.get_host_keys().add(hostname, key.get_name(), key)
@@ -769,9 +786,9 @@ def load_all_known_hosts() -> dict[str, list[tuple]]:
     hosts_data = {}
     
     # Load from script's local known_hosts
-    if KNOWN_HOSTS_PATH.exists():
+    if os.path.exists(KNOWN_HOSTS_PATH):
         try:
-            for line in KNOWN_HOSTS_PATH.read_text().splitlines():
+            for line in _read_text(KNOWN_HOSTS_PATH).splitlines():
                 if line.strip() and not line.startswith("#"):
                     parts = line.split()
                     if len(parts) >= 2:
@@ -784,10 +801,10 @@ def load_all_known_hosts() -> dict[str, list[tuple]]:
             pass
     
     # Load from user's ~/.ssh/known_hosts
-    user_known_hosts = Path.home() / ".ssh" / "known_hosts"
-    if user_known_hosts.exists():
+    user_known_hosts = os.path.join(os.path.expanduser("~"), ".ssh", "known_hosts")
+    if os.path.exists(user_known_hosts):
         try:
-            for line in user_known_hosts.read_text().splitlines():
+            for line in _read_text(user_known_hosts).splitlines():
                 if line.strip() and not line.startswith("#"):
                     parts = line.split()
                     if len(parts) >= 2:
@@ -804,13 +821,13 @@ def load_all_known_hosts() -> dict[str, list[tuple]]:
 
 def delete_known_host(hostname: str) -> None:
     """Remove a host entry from the script's known_hosts file."""
-    if not KNOWN_HOSTS_PATH.exists():
+    if not os.path.exists(KNOWN_HOSTS_PATH):
         return
     
     try:
-        lines = KNOWN_HOSTS_PATH.read_text().splitlines()
+        lines = _read_text(KNOWN_HOSTS_PATH).splitlines()
         filtered = [line for line in lines if line.strip() and not line.startswith(hostname)]
-        KNOWN_HOSTS_PATH.write_text("\n".join(filtered) + "\n" if filtered else "", encoding="utf-8")
+        _write_text(KNOWN_HOSTS_PATH, "\n".join(filtered) + "\n" if filtered else "")
     except Exception as exc:
         raise DebugFlowError(f"Failed to delete host from known_hosts: {exc}") from exc
 
@@ -869,7 +886,7 @@ def show_known_hosts_manager(parent: tk.Tk | tk.Toplevel) -> None:
     
     info_label = ttk.Label(
         manager_window,
-        text=f"Known hosts from script ({KNOWN_HOSTS_PATH.name}) and user (~/.ssh/known_hosts):",
+        text=f"Known hosts from script ({os.path.basename(KNOWN_HOSTS_PATH)}) and user (~/.ssh/known_hosts):",
         font=("", 9)
     )
     info_label.pack(fill="x", padx=4, pady=4)
@@ -884,29 +901,35 @@ def encrypt_full_profile(profile_dict: dict, passphrase: str) -> dict:
                 "The 'cryptography' package is required to encrypt profiles. "
                 "Please click 'Check / Install Requirements' first."
             )
-    if not passphrase:
-        raise ValidationError("Master passphrase cannot be empty.")
-    
+
     salt = os.urandom(16)
     nonce = os.urandom(12)
-    key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, 100_000)
+    iterations = 100_000
+
+    key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
     aesgcm = AESGCM(key)
+
     plaintext = json.dumps(profile_dict).encode("utf-8")
     ciphertext = aesgcm.encrypt(nonce, plaintext, PROFILE_AAD)
+
     return {
         "format": "fgt_debug_flow_encrypted_profile",
         "version": 3,
-        "algorithm": "AES-256-GCM",
-        "kdf": "PBKDF2-HMAC-SHA256",
-        "iterations": 100_000,
-        "salt": base64.b64encode(salt).decode("ascii"),
-        "nonce": base64.b64encode(nonce).decode("ascii"),
-        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "kdf": {
+            "algorithm": "PBKDF2-HMAC-SHA256",
+            "iterations": iterations,
+            "salt_b64": base64.b64encode(salt).decode("ascii"),
+        },
+        "cipher": {
+            "algorithm": "AES-256-GCM",
+            "nonce_b64": base64.b64encode(nonce).decode("ascii"),
+        },
+        "ciphertext_b64": base64.b64encode(ciphertext).decode("ascii"),
     }
 
 
 def decrypt_full_profile(envelope: dict, passphrase: str) -> dict:
-    """Decrypt a fully encrypted profile envelope using AES-256-GCM and the master passphrase."""
+    """Decrypt a full profile dictionary using AES-256-GCM and PBKDF2-HMAC-SHA256."""
     if AESGCM is None:
         load_optional_modules()
         if AESGCM is None:
@@ -914,14 +937,12 @@ def decrypt_full_profile(envelope: dict, passphrase: str) -> dict:
                 "The 'cryptography' package is required to decrypt profiles. "
                 "Please click 'Check / Install Requirements' first."
             )
-    if not isinstance(envelope, dict) or "ciphertext" not in envelope or "salt" not in envelope or "nonce" not in envelope:
-        raise ValidationError("Invalid or corrupted encrypted profile envelope.")
-    
+
     try:
-        salt = base64.b64decode(envelope["salt"])
-        nonce = base64.b64decode(envelope["nonce"])
-        ciphertext = base64.b64decode(envelope["ciphertext"])
-        iterations = int(envelope.get("iterations", 100_000))
+        salt = base64.b64decode(envelope["kdf"]["salt_b64"])
+        iterations = int(envelope["kdf"]["iterations"])
+        nonce = base64.b64decode(envelope["cipher"]["nonce_b64"])
+        ciphertext = base64.b64decode(envelope["ciphertext_b64"])
     except Exception as exc:
         raise ValidationError(f"Corrupted profile encryption envelope: {exc}") from exc
     
@@ -940,7 +961,7 @@ def decrypt_full_profile(envelope: dict, passphrase: str) -> dict:
 
 def save_session_profile(
     args: DebugFlowSshArgs,
-    filepath: Path,
+    filepath: str,
     passphrase: str,
 ) -> None:
     """Save a session profile to an encrypted JSON file.
@@ -959,7 +980,7 @@ def save_session_profile(
         "key_path": args.key_path or "",
         "key_passphrase": args.key_passphrase or "",
         "ssh_port": args.ssh_port,
-        "output_dir": str(args.output_dir),
+        "output_dir": args.output_dir,
         "num_packets": args.num_packets,
         "timer_seconds": args.timer_seconds,
         "file_label": args.file_label,
@@ -995,19 +1016,18 @@ def save_session_profile(
     envelope = encrypt_full_profile(raw_profile_data, passphrase)
     
     try:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(json.dumps(envelope, indent=2), encoding="utf-8")
+        _write_text(filepath, json.dumps(envelope, indent=2))
     except Exception as exc:
         raise DebugFlowError(f"Failed to save profile: {exc}") from exc
 
 
-def load_session_profile(filepath: Path, passphrase: str = "") -> dict:
+def load_session_profile(filepath: str, passphrase: str = "") -> dict:
     """Load and decrypt a session profile from an encrypted file."""
-    if not filepath.exists():
+    if not os.path.exists(filepath):
         raise DebugFlowError(f"Profile file not found: {filepath}")
     
     try:
-        data = json.loads(filepath.read_text(encoding="utf-8"))
+        data = json.loads(_read_text(filepath))
     except json.JSONDecodeError as exc:
         raise DebugFlowError(f"Invalid profile file format: {exc}") from exc
     except Exception as exc:
@@ -1173,7 +1193,7 @@ class UnlockProfilePassphraseDialog:
         )
         header.pack(anchor="w", pady=(0, 4))
 
-        filename = Path(profile_path).name
+        filename = os.path.basename(profile_path)
         desc = ttk.Label(
             main_frame,
             text=f"Profile '{filename}' is fully encrypted with AES-256-GCM.\n"
@@ -1413,7 +1433,7 @@ class SshDebugSession:
         self.completed = threading.Event()
         self.output_chunks = []
         self.error_text = ""
-        self.result_file: Path | None = None
+        self.result_file: str | None = None
         self.started_at = 0.0
         self.ended_at = 0.0
         self.start_trace_id: int | None = None
@@ -1460,17 +1480,17 @@ class SshDebugSession:
         client = paramiko.SSHClient()
         with _known_hosts_lock:
             # Load script's local known_hosts
-            if KNOWN_HOSTS_PATH.exists():
+            if os.path.exists(KNOWN_HOSTS_PATH):
                 try:
-                    client.load_host_keys(str(KNOWN_HOSTS_PATH))
+                    client.load_host_keys(KNOWN_HOSTS_PATH)
                 except Exception as exc:
-                    self.log(LOG_WARN, f"Could not read {KNOWN_HOSTS_PATH.name}: {exc}")
+                    self.log(LOG_WARN, f"Could not read {os.path.basename(KNOWN_HOSTS_PATH)}: {exc}")
             
             # Also load user's ~/.ssh/known_hosts for better interoperability
-            user_known_hosts = Path.home() / ".ssh" / "known_hosts"
-            if user_known_hosts.exists():
+            user_known_hosts = os.path.join(os.path.expanduser("~"), ".ssh", "known_hosts")
+            if os.path.exists(user_known_hosts):
                 try:
-                    client.load_host_keys(str(user_known_hosts))
+                    client.load_host_keys(user_known_hosts)
                     self.log(LOG_INFO, f"Loaded user's SSH known_hosts from {user_known_hosts}")
                 except Exception as exc:
                     self.log(LOG_WARN, f"Could not read user's known_hosts: {exc}")
@@ -1589,9 +1609,9 @@ class SshDebugSession:
             except Exception:
                 break
 
-    def write_file(self) -> Path:
-        self.args.output_dir.mkdir(parents=True, exist_ok=True)
-        path = self.args.output_dir / f"{sanitize_component(self.host, 'fortigate')}_ssh_debug_flow_{sanitize_component(self.args.file_label, 'run')}_{timestamp_token()}.txt"
+    def write_file(self) -> str:
+        filename = f"{sanitize_component(self.host, 'fortigate')}_ssh_debug_flow_{sanitize_component(self.args.file_label, 'run')}_{timestamp_token()}.txt"
+        path = os.path.join(self.args.output_dir, filename)
         elapsed = self.ended_at - self.started_at if self.ended_at and self.started_at else 0.0
         trace_id_range = (
             f"{self.start_trace_id}-{self.target_trace_id}" if self.start_trace_id is not None else "n/a"
@@ -1620,21 +1640,21 @@ class SshDebugSession:
             lines.extend(["", "=== Error ===", self.error_text])
         session_output = "".join(self.output_chunks)
         if self.args.save_text_output:
-            path.write_text("\n".join(lines), encoding="utf-8")
+            _write_text(path, "\n".join(lines))
             self.result_file = path
             self.log(LOG_INFO, f"Result file created: {path}")
 
         # Automatically export structured JSON alongside text output if enabled
         if self.args.save_json_output and self.args.save_json_separate:
             try:
-                json_path = path.with_suffix(".json")
+                json_path = f"{os.path.splitext(path)[0]}.json"
                 structured_data = parse_debug_flow_text(session_output, host=self.host)
                 structured_data["metadata"]["elapsed_seconds"] = round(elapsed, 2)
                 structured_data["metadata"]["trace_count_requested"] = self.args.num_packets
                 structured_data["metadata"]["trace_count_reached"] = self.trace_count_reached
                 structured_data["metadata"]["stop_reason"] = self.stop_reason
                 structured_data["metadata"]["active_filters"] = active_filters(self.args)
-                json_path.write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
+                _write_text(json_path, json.dumps(structured_data, indent=2))
                 self.log(LOG_INFO, f"Structured JSON trace file created: {json_path}")
             except Exception as json_exc:
                 self.log(LOG_WARNING, f"Could not generate JSON trace export: {json_exc}")
@@ -2087,7 +2107,7 @@ class DebugFlowSshGui:
         ttk.Label(conn, text="Output Directory").grid(row=7, column=0, sticky="w", padx=4, pady=2)
         out_frame = ttk.Frame(conn)
         out_frame.grid(row=7, column=1, sticky="w", padx=4, pady=2)
-        out_entry = ttk.Entry(out_frame, textvariable=self.str_var("output_dir", str(DEFAULT_OUTPUT_DIR)), width=42)
+        out_entry = ttk.Entry(out_frame, textvariable=self.str_var("output_dir", DEFAULT_OUTPUT_DIR), width=42)
         out_entry.pack(side="left", padx=(0, 6))
         browse_button = ttk.Button(out_frame, text="Browse", command=self.browse_output_dir)
         browse_button.pack(side="left")
@@ -2351,13 +2371,13 @@ class DebugFlowSshGui:
         self.install_thread.start()
 
     def browse_output_dir(self):
-        selected = filedialog.askdirectory(initialdir=self.vars["output_dir"].get() or str(DEFAULT_OUTPUT_DIR))
+        selected = filedialog.askdirectory(initialdir=self.vars["output_dir"].get() or DEFAULT_OUTPUT_DIR)
         if selected:
             self.vars["output_dir"].set(selected)
 
     def browse_key_file(self):
-        ssh_dir = Path.home() / ".ssh"
-        initial_dir = str(ssh_dir) if ssh_dir.is_dir() else str(SCRIPT_DIR)
+        ssh_dir = os.path.join(os.path.expanduser("~"), ".ssh")
+        initial_dir = ssh_dir if os.path.isdir(ssh_dir) else SCRIPT_DIR
         selected = filedialog.askopenfilename(initialdir=initial_dir, title="Select Private Key File")
         if selected:
             self.vars["key_path"].set(selected)
@@ -2389,7 +2409,7 @@ class DebugFlowSshGui:
             return
         
         try:
-            save_session_profile(args, Path(selected), passphrase=passphrase)
+            save_session_profile(args, selected, passphrase=passphrase)
             messagebox.showinfo(
                 "Profile Saved",
                 f"Profile successfully encrypted and saved to:\n{selected}\n\n"
@@ -2403,14 +2423,14 @@ class DebugFlowSshGui:
         """Load a fully encrypted profile file with passphrase decryption."""
         selected = filedialog.askopenfilename(
             filetypes=[("Encrypted Profile (*.json)", "*.json"), ("All Files", "*.*")],
-            initialdir=str(SCRIPT_DIR)
+            initialdir=SCRIPT_DIR
         )
         if not selected:
             return
         
-        profile_path = Path(selected)
+        profile_path = selected
         try:
-            raw_data = json.loads(profile_path.read_text(encoding="utf-8"))
+            raw_data = json.loads(_read_text(profile_path))
         except Exception as exc:
             messagebox.showerror("Load Failed", f"Error reading profile file: {exc}")
             return
@@ -2457,7 +2477,7 @@ class DebugFlowSshGui:
             return
         
         default_name = f"debug_flow_export_{timestamp_token()}.json"
-        initial_dir = self.vars.get("output_dir", tk.StringVar()).get() or str(DEFAULT_OUTPUT_DIR)
+        initial_dir = self.vars.get("output_dir", tk.StringVar()).get() or DEFAULT_OUTPUT_DIR
         
         file_path = filedialog.asksaveasfilename(
             parent=self.root,
@@ -2489,7 +2509,7 @@ class DebugFlowSshGui:
             if self.current_regex_filter and self.filter_mode:
                 structured_data["metadata"]["live_filter_applied"] = self.vars.get("regex_filter_pattern", tk.StringVar()).get().strip()
                 structured_data["metadata"]["live_filter_mode"] = self.filter_mode
-            Path(file_path).write_text(json.dumps(structured_data, indent=2), encoding="utf-8")
+            _write_text(file_path, json.dumps(structured_data, indent=2))
             count = structured_data["metadata"]["total_traces"]
             self.logger(LOG_INFO, f"Exported {count} trace(s) to JSON: {file_path}")
             messagebox.showinfo(
@@ -2509,7 +2529,7 @@ class DebugFlowSshGui:
         self.vars["key_path"].set(profile_data.get("key_path", "") or "")
         self.vars["key_passphrase"].set(profile_data.get("key_passphrase", "") or "")
         self.vars["ssh_port"].set(str(profile_data.get("ssh_port", DEFAULT_SSH_PORT)))
-        self.vars["output_dir"].set(profile_data.get("output_dir", str(DEFAULT_OUTPUT_DIR)))
+        self.vars["output_dir"].set(profile_data.get("output_dir", DEFAULT_OUTPUT_DIR))
         self.vars["strict_host_key_checking"].set(profile_data.get("strict_host_key_checking", True))
         
         # Debug flow options
@@ -2721,7 +2741,7 @@ class DebugFlowSshGui:
         if auth_method == "key":
             if not key_path:
                 raise ValidationError("Private Key File is required when Authentication Method is 'Private Key'.")
-            if not Path(key_path).is_file():
+            if not os.path.isfile(key_path):
                 raise ValidationError(f"Private Key File not found: {key_path}")
         elif not password:
             raise ValidationError("SSH Password is required.")
@@ -2736,7 +2756,7 @@ class DebugFlowSshGui:
             num_packets=validate_int_range("Trace Count", self.vars["num_packets"].get(), 100, 1, 1000000),
             timer_seconds=validate_int_range("Timer Seconds", self.vars["timer_seconds"].get(), 0, 0, MAX_TIMER_SECONDS),
             file_label=self.vars["file_label"].get() or "run",
-            output_dir=Path(self.vars["output_dir"].get() or str(DEFAULT_OUTPUT_DIR)),
+            output_dir=self.vars["output_dir"].get() or DEFAULT_OUTPUT_DIR,
             addr_from=validate_ip("addr_from", self.vars["addr_from"].get()),
             addr_to=validate_ip("addr_to", self.vars["addr_to"].get()),
             addr_negate=bool(self.vars["addr_negate"].get()),
@@ -2831,9 +2851,11 @@ class DebugFlowSshGui:
         self.manager_thread = threading.Thread(target=manager, daemon=True)
         self.manager_thread.start()
 
-    def write_run_report(self, args: DebugFlowSshArgs) -> Path:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        path = args.output_dir / f"run_report_{sanitize_component(args.file_label, 'run')}_{timestamp_token()}.txt"
+    def write_run_report(self, args: DebugFlowSshArgs) -> str:
+        path = os.path.join(
+            args.output_dir,
+            f"run_report_{sanitize_component(args.file_label, 'run')}_{timestamp_token()}.txt",
+        )
         lines = [
             "=== FortiGate SSH Debug Flow Run Report ===",
             f"Hosts: {', '.join(args.hosts)}",
@@ -2843,13 +2865,15 @@ class DebugFlowSshGui:
             "=== Program Log (connections, stop reasons, errors, warnings - no raw trace output) ===",
             *self.report_lines,
         ]
-        path.write_text("\n".join(lines), encoding="utf-8")
+        _write_text(path, "\n".join(lines))
         return path
 
-    def write_combined_json(self, args: DebugFlowSshArgs) -> Path:
+    def write_combined_json(self, args: DebugFlowSshArgs) -> str:
         """Generate a single combined JSON trace export aggregating all targeted hosts."""
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        path = args.output_dir / f"combined_ssh_debug_flow_{sanitize_component(args.file_label, 'run')}_{timestamp_token()}.json"
+        path = os.path.join(
+            args.output_dir,
+            f"combined_ssh_debug_flow_{sanitize_component(args.file_label, 'run')}_{timestamp_token()}.json",
+        )
         
         all_traces: list[dict[str, Any]] = []
         hosts_summary: dict[str, Any] = {}
@@ -2885,7 +2909,7 @@ class DebugFlowSshGui:
             "traces": all_traces,
         }
         
-        path.write_text(json.dumps(combined_payload, indent=2), encoding="utf-8")
+        _write_text(path, json.dumps(combined_payload, indent=2))
         return path
 
     def stop(self):
