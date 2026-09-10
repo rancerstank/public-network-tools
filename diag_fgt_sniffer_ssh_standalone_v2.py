@@ -2316,8 +2316,10 @@ class SnifferSshGui:
 
     def drain_log_queue(self) -> None:
         self.check_host_key_queue()
+        batch_limit = 200
+        displayed_any = False
         try:
-            while True:
+            for _ in range(batch_limit):
                 level, message, stamp = self.log_queue.get_nowait()
                 self.all_log_lines.append((level, message, stamp))
 
@@ -2331,9 +2333,11 @@ class SnifferSshGui:
 
                 if should_display:
                     self._insert_log_line(level, message, stamp)
-                    self.log_text.see("end")
+                    displayed_any = True
         except queue.Empty:
             pass
+        if displayed_any:
+            self.log_text.see("end")
         self.root.after(100, self.drain_log_queue)
 
     def _insert_log_line(self, level: str, message: str, stamp: str) -> None:
