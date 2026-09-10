@@ -1,8 +1,11 @@
 """
-diag_fgt_sniffer_ssh_standalone_v2.py
+diag_fgt_sniffer_ssh_standalone_v2.py (ARCHIVED / LEGACY)
 
 Standalone FortiGate Packet Sniffer utility over direct SSH using Paramiko.
-Supersedes diag_fgt_sniffer_ssh_standalone_v1.py (archived).
+SUPERSEDED BY: diag_fgt_sniffer_pcap_v3.py
+Preserved for historical reference. For current production use, use diag_fgt_sniffer_pcap_v3.py
+which adds Chronological Combined Text and Multi-Device Combined PCAP creation with reactive
+checkbox interlocking.
 
 Key Features ported & enhanced from diag_fgt_debug_flow_v3.py:
 - Standardized on Paramiko worker threads (dedicated thread per firewall, no async event-loop collisions).
