@@ -366,14 +366,17 @@ def active_filters(args: DebugFlowSshArgs) -> list[str]:
     return values
 
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 TRACE_ID_PATTERN = re.compile(r"trace_id=(\d+)")
 
 
 def extract_trace_id(line: str) -> int | None:
-    match = TRACE_ID_PATTERN.search(line)
+    clean = ANSI_ESCAPE_RE.sub("", line)
+    match = TRACE_ID_PATTERN.search(clean)
     if match is None:
         return None
     return int(match.group(1))
+
 
 
 class BooleanRegexFilter:
@@ -478,8 +481,6 @@ PROTO_MAP: dict[int, str] = {
     89: "OSPF",
     112: "VRRP",
 }
-
-ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 DEBUG_FLOW_TS_RE = re.compile(
     r"^(?:\[(?P<host>[^\]]+)\]\s+)?"
@@ -1501,15 +1502,21 @@ class RunCoordinator:
     instead of continuing to collect on its own.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sessions: list[Any] | None = None) -> None:
         self.trace_stop_event = threading.Event()
         self.trace_stop_host: str | None = None
         self.trace_stop_reason: str = ""
+        self.sessions: list[Any] = list(sessions) if sessions else []
         self._lock = threading.Lock()
+
+    def set_sessions(self, sessions: list[Any]) -> None:
+        with self._lock:
+            self.sessions = list(sessions)
 
     def claim_trace_stop(self, host: str, reason: str = "") -> bool:
         """Record which host first reached its trace count. Returns True only
-        for the first caller, so only that host is recorded as the cause."""
+        for the first caller, so only that host is recorded as the cause.
+        Immediately notifies and stops all other running sessions."""
         with self._lock:
             if self.trace_stop_event.is_set():
                 return False
@@ -1517,7 +1524,24 @@ class RunCoordinator:
             if reason:
                 self.trace_stop_reason = reason
             self.trace_stop_event.set()
+
+            # Proactively stop all other active sessions so they don't block
+            for session in self.sessions:
+                if (
+                    getattr(session, "host", None) != host
+                    and hasattr(session, "completed")
+                    and not session.completed.is_set()
+                    and hasattr(session, "stop_requested")
+                    and not session.stop_requested.is_set()
+                ):
+                    stop_msg = (
+                        f"Stopped by {host} "
+                        f"({reason or 'that host reached its trace count first'})."
+                    )
+                    session.log(LOG_INFO, stop_msg)
+                    session.send_ctrl_c(stop_msg)
             return True
+
 
 
 # The worker session object represents one SSH connection to a single FortiGate.
@@ -1552,9 +1576,9 @@ class SshDebugSession:
         self.start_trace_id: int | None = None
         self.target_trace_id: int | None = None
         self.trace_count_reached = False
+        self.packet_count = 0
+        self.last_seen_trace_id: int | None = None
         self.seen_trace_ids: set[int] = set()
-        self.target_trace_seen = False
-        self.target_trace_last_line_at = 0.0
         self.stop_reason = "n/a"
         self._line_buffer = ""
 
@@ -1653,6 +1677,10 @@ class SshDebugSession:
         if trace_id is None:
             return
 
+        if trace_id != self.last_seen_trace_id:
+            self.last_seen_trace_id = trace_id
+            self.packet_count += 1
+
         self.seen_trace_ids.add(trace_id)
 
         if self.start_trace_id is None:
@@ -1661,26 +1689,23 @@ class SshDebugSession:
             self.log(
                 LOG_INFO,
                 f"First trace_id observed: {trace_id}. Session will stop once "
-                f"trace_id {self.target_trace_id} finishes ({self.args.num_packets} trace(s) requested).",
+                f"{self.args.num_packets} trace(s) are captured.",
             )
 
-        # If a trace beyond target is seen, or distinct count exceeded, target trace is definitely complete
-        if (self.target_trace_id is not None and trace_id > self.target_trace_id) or len(self.seen_trace_ids) > self.args.num_packets:
+        if (
+            self.packet_count >= self.args.num_packets
+            or len(self.seen_trace_ids) >= self.args.num_packets
+        ):
             self.trace_count_reached = True
-            captured = len(self.seen_trace_ids)
+            captured = max(len(self.seen_trace_ids), self.packet_count)
             reason = (
-                f"Requested trace count reached ({captured}/{self.args.num_packets} trace(s) captured, "
-                f"trace_id {trace_id} observed after target {self.target_trace_id})."
+                f"Requested trace count reached ({captured}/{self.args.num_packets} trace(s) captured)."
             )
             self.log(LOG_INFO, reason)
             self.coordinator.claim_trace_stop(self.host, reason)
             self.send_ctrl_c(reason)
             return
 
-        # If target trace is reached (by target_trace_id or count), mark it seen and update timestamp
-        if (self.target_trace_id is not None and trace_id >= self.target_trace_id) or len(self.seen_trace_ids) >= self.args.num_packets:
-            self.target_trace_seen = True
-            self.target_trace_last_line_at = time.monotonic()
 
     def _handle_complete_line(self, line: str) -> None:
         stripped = line.rstrip("\r")
@@ -1787,27 +1812,20 @@ class SshDebugSession:
             while not self.stop_requested.is_set():
                 self.drain_channel()
                 if self.trace_count_reached:
-                    captured_count = len(self.seen_trace_ids) if self.seen_trace_ids else self.args.num_packets
+                    captured_count = max(len(self.seen_trace_ids), self.packet_count) if (self.seen_trace_ids or self.packet_count) else self.args.num_packets
+                    target_str = (
+                        f"trace_id {self.start_trace_id}-{self.target_trace_id}"
+                        if self.start_trace_id is not None
+                        else f"limit {self.args.num_packets}"
+                    )
                     reason = (
-                        f"Stopped by trace count (trace_id {self.start_trace_id}-{self.target_trace_id}, "
+                        f"Stopped by trace count ({target_str}, "
                         f"{captured_count} trace(s) captured)."
                     )
                     self.log(LOG_INFO, reason)
+                    self.coordinator.claim_trace_stop(self.host, reason)
                     self.send_ctrl_c(reason)
                     break
-                if self.target_trace_seen and not self.trace_count_reached:
-                    # Give trailing lines of the target trace 350ms of quiet channel to finish arriving
-                    if time.monotonic() - self.target_trace_last_line_at >= 0.35:
-                        self.trace_count_reached = True
-                        captured_count = len(self.seen_trace_ids) if self.seen_trace_ids else self.args.num_packets
-                        reason = (
-                            f"Requested trace count reached ({captured_count}/{self.args.num_packets} trace(s) captured, "
-                            f"target trace_id {self.target_trace_id} finished)."
-                        )
-                        self.log(LOG_INFO, reason)
-                        self.coordinator.claim_trace_stop(self.host, reason)
-                        self.send_ctrl_c(reason)
-                        break
                 if self.coordinator.trace_stop_event.is_set():
                     reason = (
                         f"Stopped by {self.coordinator.trace_stop_host} "
@@ -1823,9 +1841,11 @@ class SshDebugSession:
                 if timer_deadline is not None and time.monotonic() >= timer_deadline:
                     reason = "Stopped by timer expiration."
                     self.log(LOG_INFO, reason)
+                    self.coordinator.claim_trace_stop(self.host, reason)
                     self.send_ctrl_c(reason)
                     break
                 time.sleep(0.1)
+
             self.drain_channel()
             self.cleanup_remote_debug()
             time.sleep(0.5)
@@ -2957,7 +2977,9 @@ class DebugFlowSshGui:
             )
             for host in args.hosts
         ]
+        coordinator.set_sessions(self.sessions)
         self.threads = []
+
         self.report_lines = []
         self.set_running_state(True)
         self.logger(LOG_INFO, f"Starting SSH debug flow on {len(self.sessions)} host(s).")
