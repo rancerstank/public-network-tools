@@ -66,7 +66,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Any
 
 try:
@@ -224,16 +224,45 @@ def find_text2pcap(custom_dir_or_exe: str | None = None) -> str | None:
     return None
 
 
-def normalize_for_text2pcap(raw_text: str) -> str:
+def normalize_for_text2pcap(raw_text: str, base_datetime: datetime | None = None) -> str:
     """Normalize FortiOS sniffer text output for Wireshark text2pcap conversion.
     
     Extracts timestamps and parses 0x0000 hex rows into standard text2pcap input format:
     YYYY-MM-DD HH:MM:SS.ffffff
     000000 45 00 00 28 ...
     000010 ...
+
+    Supports ISO dates, slash dates (normalized to dashes), timestamps without fractional
+    seconds (padded with .000000), and relative timestamps (converted to synthetic ISO
+    datetimes preserving packet delta intervals with microsecond precision).
     """
     output, packet = [], []
     timestamp = None
+
+    # Determine base_dt for relative timestamps
+    base_dt = base_datetime
+    if base_dt is None:
+        for r_line in raw_text.splitlines():
+            s = r_line.strip()
+            if s.startswith("[") and "]" in s:
+                s = s.split("]", 1)[1].strip()
+            m_abs_peek = re.match(r"^(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b", s)
+            if m_abs_peek:
+                d_str, t_str = m_abs_peek.group(1), m_abs_peek.group(2)
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S",
+                    "%m/%d/%Y %H:%M:%S.%f", "%m/%d/%Y %H:%M:%S",
+                    "%d/%m/%Y %H:%M:%S.%f", "%d/%m/%Y %H:%M:%S",
+                ):
+                    try:
+                        base_dt = datetime.strptime(f"{d_str} {t_str}", fmt)
+                        break
+                    except ValueError:
+                        pass
+                if base_dt:
+                    break
+        if base_dt is None:
+            base_dt = datetime.now()
 
     def flush():
         nonlocal packet, timestamp
@@ -256,7 +285,33 @@ def normalize_for_text2pcap(raw_text: str) -> str:
         absolute = re.match(r"^(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b", line)
         if absolute:
             flush()
-            timestamp = f"{absolute.group(1)} {absolute.group(2)}"
+            d_part, t_part = absolute.group(1), absolute.group(2)
+            # Ensure 6 fractional microsecond digits for strict text2pcap strptime matching
+            if "." not in t_part:
+                t_part = f"{t_part}.000000"
+            else:
+                tp, frac = t_part.split(".", 1)
+                t_part = f"{tp}.{frac.ljust(6, '0')[:6]}"
+
+            # Normalize slashes to dashes
+            if "/" in d_part:
+                for dfmt in ("%m/%d/%Y", "%d/%m/%Y"):
+                    try:
+                        dt_obj = datetime.strptime(d_part, dfmt)
+                        d_part = dt_obj.strftime("%Y-%m-%d")
+                        break
+                    except ValueError:
+                        pass
+            timestamp = f"{d_part} {t_part}"
+            continue
+
+        # Match relative timestamp: e.g. "1.234567 port1 in ..." or "1.234567"
+        m_rel = re.match(r"^(\d+\.\d+)(?:\s+|$)", line)
+        if m_rel and not re.match(r"^\d+\.\d+\.\d+", line):
+            flush()
+            rel_sec = float(m_rel.group(1))
+            ts_dt = base_dt + timedelta(seconds=rel_sec)
+            timestamp = ts_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
             continue
 
         # Match hex row: 0x0000 4500 004e ...
@@ -323,7 +378,14 @@ def create_pcap_file(text_path: str, text2pcap_exe: str | None = None) -> tuple[
 def parse_packet_timestamp_sort_key(ts_str: str) -> tuple[int, float | str]:
     """Parse a timestamp string into a sortable key tuple."""
     ts_clean = ts_str.strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M:%S.%f", "%m/%d/%Y %H:%M:%S"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S.%f",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S.%f",
+        "%d/%m/%Y %H:%M:%S",
+    ):
         try:
             dt = datetime.strptime(ts_clean, fmt)
             return (0, dt.timestamp())
@@ -402,21 +464,32 @@ class SnifferSshArgs:
     ssh_port: int = DEFAULT_SSH_PORT
     interface: str = "any"
     verbose: int = 6
+    ts_format: str = "l"
     count: int = 300
     duration_seconds: int = 1800
     file_label: str = "run"
     output_dir: str = DEFAULT_OUTPUT_DIR
     wireshark_path: str = ""
     protocol: str = ""
+    protocol_negate: bool = False
     host: str = ""
+    host_negate: bool = False
     src_host: str = ""
+    src_host_negate: bool = False
     dst_host: str = ""
+    dst_host_negate: bool = False
     port: str = ""
+    port_negate: bool = False
     src_port: str = ""
+    src_port_negate: bool = False
     dst_port: str = ""
+    dst_port_negate: bool = False
     net: str = ""
+    net_negate: bool = False
     src_net: str = ""
+    src_net_negate: bool = False
     dst_net: str = ""
+    dst_net_negate: bool = False
     custom_filter: str = ""
     strict_host_key_checking: bool = True
     save_text_output: bool = True
@@ -521,22 +594,26 @@ def build_sniffer_filter(args: SnifferSshArgs) -> str:
             v_low = value.lower()
             if v_low not in {"tcp", "udp", "icmp", "ip", "arp", "esp", "gre"}:
                 raise ValidationError(f"Invalid protocol in filter: {value}")
-            clauses.append(v_low)
+            clause = f"not {v_low}" if args.protocol_negate else v_low
+            clauses.append(clause)
 
-    for field_val, prefix, validator, name in (
-        (args.host, "host", validate_ip, "Host"),
-        (args.src_host, "src host", validate_ip, "Source Host"),
-        (args.dst_host, "dst host", validate_ip, "Destination Host"),
-        (args.port, "port", validate_port, "Port"),
-        (args.src_port, "src port", validate_port, "Source Port"),
-        (args.dst_port, "dst port", validate_port, "Destination Port"),
-        (args.net, "net", validate_net, "Net"),
-        (args.src_net, "src net", validate_net, "Source Net"),
-        (args.dst_net, "dst net", validate_net, "Destination Net"),
+    for field_val, prefix, validator, name, negate in (
+        (args.host, "host", validate_ip, "Host", args.host_negate),
+        (args.src_host, "src host", validate_ip, "Source Host", args.src_host_negate),
+        (args.dst_host, "dst host", validate_ip, "Destination Host", args.dst_host_negate),
+        (args.port, "port", validate_port, "Port", args.port_negate),
+        (args.src_port, "src port", validate_port, "Source Port", args.src_port_negate),
+        (args.dst_port, "dst port", validate_port, "Destination Port", args.dst_port_negate),
+        (args.net, "net", validate_net, "Net", args.net_negate),
+        (args.src_net, "src net", validate_net, "Source Net", args.src_net_negate),
+        (args.dst_net, "dst net", validate_net, "Destination Net", args.dst_net_negate),
     ):
         for value in split_values(field_val):
             validator(name, value)
-            clauses.append(f"{prefix} {value}")
+            clause = f"{prefix} {value}"
+            if negate:
+                clause = f"not {clause}"
+            clauses.append(clause)
 
     if args.custom_filter.strip():
         custom = args.custom_filter.strip()
@@ -555,9 +632,10 @@ def build_sniffer_command(args: SnifferSshArgs) -> str:
     filter_expr = build_sniffer_filter(args)
     quoted = quote_filter(filter_expr)
     # FortiOS syntax: diagnose sniffer packet <interface> <filter> <verbose> <count> <tsformat>
-    # tsformat: l (local timestamp)
+    # tsformat: l (local timestamp), a (UTC timestamp), or omitted for relative timestamp
     count_val = args.count if args.count > 0 else 0
-    return f"diagnose sniffer packet {args.interface} {quoted} {args.verbose} {count_val} l"
+    ts_part = f" {args.ts_format}" if args.ts_format in ("l", "a") else ""
+    return f"diagnose sniffer packet {args.interface} {quoted} {args.verbose} {count_val}{ts_part}"
 
 
 def split_ip_port(endpoint: str) -> tuple[str, int | None]:
@@ -1094,21 +1172,32 @@ def save_session_profile(args: SnifferSshArgs, filepath: str, passphrase: str) -
         "ssh_port": args.ssh_port,
         "interface": args.interface,
         "verbose": args.verbose,
+        "ts_format": args.ts_format,
         "count": args.count,
         "duration_seconds": args.duration_seconds,
         "file_label": args.file_label,
         "output_dir": args.output_dir,
         "wireshark_path": args.wireshark_path,
         "protocol": args.protocol,
+        "protocol_negate": args.protocol_negate,
         "host": args.host,
+        "host_negate": args.host_negate,
         "src_host": args.src_host,
+        "src_host_negate": args.src_host_negate,
         "dst_host": args.dst_host,
+        "dst_host_negate": args.dst_host_negate,
         "port": args.port,
+        "port_negate": args.port_negate,
         "src_port": args.src_port,
+        "src_port_negate": args.src_port_negate,
         "dst_port": args.dst_port,
+        "dst_port_negate": args.dst_port_negate,
         "net": args.net,
+        "net_negate": args.net_negate,
         "src_net": args.src_net,
+        "src_net_negate": args.src_net_negate,
         "dst_net": args.dst_net,
+        "dst_net_negate": args.dst_net_negate,
         "custom_filter": args.custom_filter,
         "strict_host_key_checking": args.strict_host_key_checking,
         "save_text_output": args.save_text_output,
@@ -1816,6 +1905,8 @@ FIELD_HELP = {
     "src_net": "Filter only on source subnet / CIDR.",
     "dst_net": "Filter only on destination subnet / CIDR.",
     "custom_filter": "Raw BPF filter expression passed directly to FortiOS (e.g. 'port 80 or port 443').",
+    "filter_negate": "Inverts this filter with 'not' in BPF syntax (e.g. 'not host 10.10.10.10', 'not port 445'). Only has an effect if a value is set.",
+    "ts_format": "Packet timestamp format sent to FortiOS sniffer. 'Local (l)' uses FortiGate local time, 'UTC (a)' uses UTC time, and 'Relative (none)' measures elapsed seconds from sniffer start.",
     "start_button": "Start SSH packet sniffer sessions across all target firewalls.",
     "stop_button": "Interrupt running sniffer sessions (sends Ctrl+C, executes remote stop cleanup, and writes output files).",
     "clear_log_button": "Clear current console log view.",
@@ -1837,6 +1928,13 @@ VERBOSE_CHOICES = [
     ("5", "5 — Header + IP payload + Interface name"),
     ("6", "6 — Header + Ethernet payload + Interface name (Best for PCAP)"),
 ]
+
+TS_FORMAT_CHOICES = [
+    ("l", "Local (l) — YYYY-MM-DD HH:MM:SS (Local Time)"),
+    ("a", "UTC (a) — YYYY-MM-DD HH:MM:SS (UTC)"),
+    ("none", "Relative (none) — Elapsed Seconds from Start"),
+]
+DEFAULT_TS_FORMAT = "l"
 
 
 class SnifferSshGui:
@@ -2053,46 +2151,64 @@ class SnifferSshGui:
         ToolTip(lbl_lbl, FIELD_HELP["file_label"])
         ToolTip(lbl_entry, FIELD_HELP["file_label"])
 
-        # Row 4: Per-Host Output Options Checkboxes
-        r4 = ttk.Frame(opts)
-        r4.grid(row=4, column=0, sticky="w", padx=4, pady=(4, 2))
+        # Row 4: Timestamp Format
+        r4_ts = ttk.Frame(opts)
+        r4_ts.grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        ts_lbl = ttk.Label(r4_ts, text="Timestamp Format", width=14, anchor="w")
+        ts_lbl.pack(side="left", padx=(0, 4))
+        self.ts_format_var = tk.StringVar(value=TS_FORMAT_CHOICES[0][1])
+        self.vars["ts_format"] = self.ts_format_var
+        ts_combo = ttk.Combobox(
+            r4_ts,
+            textvariable=self.ts_format_var,
+            values=[desc for _, desc in TS_FORMAT_CHOICES],
+            width=64,
+            state="readonly",
+        )
+        ts_combo.pack(side="left")
+        ToolTip(ts_lbl, FIELD_HELP["ts_format"])
+        ToolTip(ts_combo, FIELD_HELP["ts_format"])
 
-        ttk.Label(r4, text="Per-Host:", width=10, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
+        # Row 5: Per-Host Output Options Checkboxes
+        r5 = ttk.Frame(opts)
+        r5.grid(row=5, column=0, sticky="w", padx=4, pady=(4, 2))
+
+        ttk.Label(r5, text="Per-Host:", width=10, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
 
         self.txt_out_cb = ttk.Checkbutton(
-            r4, text="Save Text Output (.txt)", variable=self.bool_var("save_text_output", True), command=self.update_output_states
+            r5, text="Save Text Output (.txt)", variable=self.bool_var("save_text_output", True), command=self.update_output_states
         )
         self.txt_out_cb.pack(side="left", padx=(0, 14))
         ToolTip(self.txt_out_cb, FIELD_HELP["save_text_output"])
 
-        self.pcap_cb = ttk.Checkbutton(r4, text="Create PCAP (.pcap)", variable=self.bool_var("create_pcap", True))
+        self.pcap_cb = ttk.Checkbutton(r5, text="Create PCAP (.pcap)", variable=self.bool_var("create_pcap", True))
         self.pcap_cb.pack(side="left", padx=(0, 14))
         ToolTip(self.pcap_cb, FIELD_HELP["create_pcap"])
 
         self.json_sep_cb = ttk.Checkbutton(
-            r4, text="Save JSON (.json)", variable=self.bool_var("save_json_separate", True)
+            r5, text="Save JSON (.json)", variable=self.bool_var("save_json_separate", True)
         )
         self.json_sep_cb.pack(side="left")
         ToolTip(self.json_sep_cb, FIELD_HELP["save_json_separate"])
 
-        # Row 5: Combined (Multi-Device) Output Options Checkboxes
-        r5 = ttk.Frame(opts)
-        r5.grid(row=5, column=0, sticky="w", padx=4, pady=(2, 4))
+        # Row 6: Combined (Multi-Device) Output Options Checkboxes
+        r6 = ttk.Frame(opts)
+        r6.grid(row=6, column=0, sticky="w", padx=4, pady=(2, 4))
 
-        ttk.Label(r5, text="Combined:", width=10, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
+        ttk.Label(r6, text="Combined:", width=10, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
 
         self.comb_txt_cb = ttk.Checkbutton(
-            r5, text="Save Combined Text (.txt)", variable=self.bool_var("save_combined_text", True), command=self.update_output_states
+            r6, text="Save Combined Text (.txt)", variable=self.bool_var("save_combined_text", True), command=self.update_output_states
         )
         self.comb_txt_cb.pack(side="left", padx=(0, 14))
         ToolTip(self.comb_txt_cb, FIELD_HELP["save_combined_text"])
 
-        self.comb_pcap_cb = ttk.Checkbutton(r5, text="Create Combined PCAP (.pcap)", variable=self.bool_var("create_combined_pcap", True))
+        self.comb_pcap_cb = ttk.Checkbutton(r6, text="Create Combined PCAP (.pcap)", variable=self.bool_var("create_combined_pcap", True))
         self.comb_pcap_cb.pack(side="left", padx=(0, 14))
         ToolTip(self.comb_pcap_cb, FIELD_HELP["create_combined_pcap"])
 
         self.json_comb_cb = ttk.Checkbutton(
-            r5, text="Combined JSON (.json)", variable=self.bool_var("save_json_combined", True)
+            r6, text="Combined JSON (.json)", variable=self.bool_var("save_json_combined", True)
         )
         self.json_comb_cb.pack(side="left")
         ToolTip(self.json_comb_cb, FIELD_HELP["save_json_combined"])
@@ -2106,58 +2222,34 @@ class SnifferSshGui:
         filters.columnconfigure(3, weight=1)
         filters.columnconfigure(5, weight=1)
 
-        ttk.Label(filters, text="Protocol:").grid(row=0, column=0, sticky="w", padx=(4, 6), pady=2)
-        proto_entry = ttk.Entry(filters, textvariable=self.str_var("protocol"), width=16)
-        proto_entry.grid(row=0, column=1, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(proto_entry, FIELD_HELP["protocol"])
+        def add_filter_field(row: int, col: int, label: str, key: str, width: int = 14) -> ttk.Entry:
+            ttk.Label(filters, text=label).grid(row=row, column=col, sticky="w", padx=(4, 6), pady=2)
+            cell = ttk.Frame(filters)
+            cell.grid(row=row, column=col + 1, sticky="w", padx=(0, 4), pady=2)
+            entry = ttk.Entry(cell, textvariable=self.str_var(key), width=width)
+            entry.pack(side="left")
+            not_cb = ttk.Checkbutton(cell, text="Not", variable=self.bool_var(f"{key}_negate", False))
+            not_cb.pack(side="left", padx=(4, 2))
+            ToolTip(entry, FIELD_HELP[key])
+            ToolTip(not_cb, FIELD_HELP["filter_negate"])
+            return entry
+
+        proto_entry = add_filter_field(0, 0, "Protocol:", "protocol", width=14)
 
         # Host / Src Host / Dst Host
-        ttk.Label(filters, text="Host:").grid(row=1, column=0, sticky="w", padx=(4, 6), pady=2)
-        h_entry = ttk.Entry(filters, textvariable=self.str_var("host"), width=18)
-        h_entry.grid(row=1, column=1, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(h_entry, FIELD_HELP["host"])
-
-        ttk.Label(filters, text="Src Host:").grid(row=1, column=2, sticky="w", padx=(4, 6), pady=2)
-        sh_entry = ttk.Entry(filters, textvariable=self.str_var("src_host"), width=18)
-        sh_entry.grid(row=1, column=3, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(sh_entry, FIELD_HELP["src_host"])
-
-        ttk.Label(filters, text="Dst Host:").grid(row=1, column=4, sticky="w", padx=(4, 6), pady=2)
-        dh_entry = ttk.Entry(filters, textvariable=self.str_var("dst_host"), width=18)
-        dh_entry.grid(row=1, column=5, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(dh_entry, FIELD_HELP["dst_host"])
+        h_entry = add_filter_field(1, 0, "Host:", "host", width=14)
+        sh_entry = add_filter_field(1, 2, "Src Host:", "src_host", width=14)
+        dh_entry = add_filter_field(1, 4, "Dst Host:", "dst_host", width=14)
 
         # Port / Src Port / Dst Port
-        ttk.Label(filters, text="Port:").grid(row=2, column=0, sticky="w", padx=(4, 6), pady=2)
-        p_entry = ttk.Entry(filters, textvariable=self.str_var("port"), width=18)
-        p_entry.grid(row=2, column=1, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(p_entry, FIELD_HELP["port"])
-
-        ttk.Label(filters, text="Src Port:").grid(row=2, column=2, sticky="w", padx=(4, 6), pady=2)
-        sp_entry = ttk.Entry(filters, textvariable=self.str_var("src_port"), width=18)
-        sp_entry.grid(row=2, column=3, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(sp_entry, FIELD_HELP["src_port"])
-
-        ttk.Label(filters, text="Dst Port:").grid(row=2, column=4, sticky="w", padx=(4, 6), pady=2)
-        dp_entry = ttk.Entry(filters, textvariable=self.str_var("dst_port"), width=18)
-        dp_entry.grid(row=2, column=5, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(dp_entry, FIELD_HELP["dst_port"])
+        p_entry = add_filter_field(2, 0, "Port:", "port", width=14)
+        sp_entry = add_filter_field(2, 2, "Src Port:", "src_port", width=14)
+        dp_entry = add_filter_field(2, 4, "Dst Port:", "dst_port", width=14)
 
         # Net / Src Net / Dst Net
-        ttk.Label(filters, text="Net/CIDR:").grid(row=3, column=0, sticky="w", padx=(4, 6), pady=2)
-        n_entry = ttk.Entry(filters, textvariable=self.str_var("net"), width=18)
-        n_entry.grid(row=3, column=1, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(n_entry, FIELD_HELP["net"])
-
-        ttk.Label(filters, text="Src Net:").grid(row=3, column=2, sticky="w", padx=(4, 6), pady=2)
-        sn_entry = ttk.Entry(filters, textvariable=self.str_var("src_net"), width=18)
-        sn_entry.grid(row=3, column=3, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(sn_entry, FIELD_HELP["src_net"])
-
-        ttk.Label(filters, text="Dst Net:").grid(row=3, column=4, sticky="w", padx=(4, 6), pady=2)
-        dn_entry = ttk.Entry(filters, textvariable=self.str_var("dst_net"), width=18)
-        dn_entry.grid(row=3, column=5, sticky="w", padx=(0, 4), pady=2)
-        ToolTip(dn_entry, FIELD_HELP["dst_net"])
+        n_entry = add_filter_field(3, 0, "Net/CIDR:", "net", width=14)
+        sn_entry = add_filter_field(3, 2, "Src Net:", "src_net", width=14)
+        dn_entry = add_filter_field(3, 4, "Dst Net:", "dst_net", width=14)
 
         # Custom Raw Filter
         ttk.Label(filters, text="Custom Filter:").grid(row=4, column=0, sticky="w", padx=(4, 6), pady=2)
@@ -2659,16 +2751,15 @@ class SnifferSshGui:
         self.vars["duration_seconds"].set(str(profile_data.get("duration_seconds", 1800)))
         self.vars["file_label"].set(profile_data.get("file_label", "run"))
 
-        self.vars["protocol"].set(profile_data.get("protocol", ""))
-        self.vars["host"].set(profile_data.get("host", ""))
-        self.vars["src_host"].set(profile_data.get("src_host", ""))
-        self.vars["dst_host"].set(profile_data.get("dst_host", ""))
-        self.vars["port"].set(profile_data.get("port", ""))
-        self.vars["src_port"].set(profile_data.get("src_port", ""))
-        self.vars["dst_port"].set(profile_data.get("dst_port", ""))
-        self.vars["net"].set(profile_data.get("net", ""))
-        self.vars["src_net"].set(profile_data.get("src_net", ""))
-        self.vars["dst_net"].set(profile_data.get("dst_net", ""))
+        saved_ts = str(profile_data.get("ts_format", DEFAULT_TS_FORMAT)).strip()
+        for code, desc in TS_FORMAT_CHOICES:
+            if saved_ts in (code, desc):
+                self.ts_format_var.set(desc)
+                break
+
+        for key in ("protocol", "host", "src_host", "dst_host", "port", "src_port", "dst_port", "net", "src_net", "dst_net"):
+            self.vars[key].set(profile_data.get(key, ""))
+            self.vars[f"{key}_negate"].set(profile_data.get(f"{key}_negate", False))
         self.vars["custom_filter"].set(profile_data.get("custom_filter", ""))
 
         self.vars["save_text_output"].set(profile_data.get("save_text_output", True))
@@ -2713,6 +2804,13 @@ class SnifferSshGui:
                 verbose_val = int(num)
                 break
 
+        ts_raw = self.ts_format_var.get()
+        ts_code = DEFAULT_TS_FORMAT
+        for code, desc in TS_FORMAT_CHOICES:
+            if ts_raw in (code, desc):
+                ts_code = code
+                break
+
         ws_path = self.vars.get("wireshark_path", tk.StringVar()).get().strip()
 
         args = SnifferSshArgs(
@@ -2725,21 +2823,32 @@ class SnifferSshGui:
             ssh_port=validate_int_range("SSH Port", self.vars["ssh_port"].get(), DEFAULT_SSH_PORT, 1, 65535),
             interface=(self.vars["interface"].get().strip() or "any"),
             verbose=verbose_val,
+            ts_format=ts_code,
             count=validate_int_range("Packet Count", self.vars["count"].get(), 300, 0, 10000000),
             duration_seconds=validate_int_range("Duration Seconds", self.vars["duration_seconds"].get(), 1800, 0, MAX_DURATION_SECONDS),
             file_label=self.vars["file_label"].get() or "run",
             output_dir=self.vars["output_dir"].get() or DEFAULT_OUTPUT_DIR,
             wireshark_path=ws_path,
             protocol=self.vars["protocol"].get().strip(),
+            protocol_negate=bool(self.vars.get("protocol_negate", tk.BooleanVar(value=False)).get()),
             host=self.vars["host"].get().strip(),
+            host_negate=bool(self.vars.get("host_negate", tk.BooleanVar(value=False)).get()),
             src_host=self.vars["src_host"].get().strip(),
+            src_host_negate=bool(self.vars.get("src_host_negate", tk.BooleanVar(value=False)).get()),
             dst_host=self.vars["dst_host"].get().strip(),
+            dst_host_negate=bool(self.vars.get("dst_host_negate", tk.BooleanVar(value=False)).get()),
             port=self.vars["port"].get().strip(),
+            port_negate=bool(self.vars.get("port_negate", tk.BooleanVar(value=False)).get()),
             src_port=self.vars["src_port"].get().strip(),
+            src_port_negate=bool(self.vars.get("src_port_negate", tk.BooleanVar(value=False)).get()),
             dst_port=self.vars["dst_port"].get().strip(),
+            dst_port_negate=bool(self.vars.get("dst_port_negate", tk.BooleanVar(value=False)).get()),
             net=self.vars["net"].get().strip(),
+            net_negate=bool(self.vars.get("net_negate", tk.BooleanVar(value=False)).get()),
             src_net=self.vars["src_net"].get().strip(),
+            src_net_negate=bool(self.vars.get("src_net_negate", tk.BooleanVar(value=False)).get()),
             dst_net=self.vars["dst_net"].get().strip(),
+            dst_net_negate=bool(self.vars.get("dst_net_negate", tk.BooleanVar(value=False)).get()),
             custom_filter=self.vars["custom_filter"].get().strip(),
             strict_host_key_checking=bool(self.vars["strict_host_key_checking"].get()),
             save_text_output=bool(self.vars.get("save_text_output", tk.BooleanVar(value=True)).get()),
