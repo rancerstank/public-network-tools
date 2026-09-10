@@ -82,6 +82,8 @@ Resolved in v2:
   - Per-Host and Combined JSON operate as independent, non-locking toggles.
 - **High-Volume GUI Responsiveness Optimization**: Decoupled Tkinter log drainage with a 200-line batch cap and deferred `see("end")` redraw, completely eliminating GUI freezes during high-throughput sniffer bursts at verbose level 6.
 - **AES-256-GCM Profile Persistence**: Fully persists and restores all 6 output format preferences within master-passphrase encrypted session profiles.
+- **Traffic Filter Negation ("Not" Checkboxes)**: Dedicated "Not" checkboxes next to all structured filter builder inputs (Protocol, Host, Src Host, Dst Host, Port, Src Port, Dst Port, Net, Src Net, Dst Net) prefixing generated BPF filter clauses with `not` (e.g. `not host 10.10.10.10`, `not port 445`). Fully persisted and restored in AES-256-GCM encrypted session profiles.
+- **Timestamp Format Selector & Microsecond PCAP Normalization**: Added a **Timestamp Format** dropdown to *Sniffer & Output Options* supporting **`Local (l)`** (default), **`UTC (a)`**, and **`Relative (none)`**. Enhanced `normalize_for_text2pcap()` to automatically normalize slash dates (`MM/DD/YYYY` or `DD/MM/YYYY`), timestamps without microsecond fractions, and relative elapsed offsets (`\d+\.\d+`) into strict `YYYY-MM-DD HH:MM:SS.ffffff` formatting. Completely resolves blank/flat timestamps in Wireshark PCAPs, guaranteeing accurate packet arrival and delta times.
 
 ### FortiGate Packet Sniffer v2 ([archived/diag_fgt_sniffer_ssh_standalone_v2.py](FortiNet/FortiOS/Standalone/archived/diag_fgt_sniffer_ssh_standalone_v2.py)):
 
