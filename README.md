@@ -1,18 +1,30 @@
 # network-tools
 
-This repository contains a small set of standalone utilities for network administration tasks. The main tool is a FortiGate debug-flow collector that opens an SSH session to one or more devices, sends FortiOS debug commands, and saves the resulting output to timestamped text files.
+This repository contains a small set of standalone utilities for network administration tasks.
 
-## Main tool
+## Main Tools
 
+### 1. FortiGate Debug Flow (`diag_fgt_debug_flow_v3.py`)
 - Script: [FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v3.py](FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v3.py)
 - Purpose: run FortiOS debug-flow traces over SSH, apply optional filters, and capture the session output for later review.
 - Runtime requirements: Python with Tkinter available, `paramiko` (for SSH), and `cryptography` (for AES-256-GCM encrypted profiles). Missing packages can be installed directly from the GUI via the "Check / Install Requirements" button.
 - Previous versions: [v2](FortiNet/FortiOS/Standalone/archived/diag_fgt_debug_flow_v2.py), [v1](FortiNet/FortiOS/Standalone/archived/diag_fgt_debug_flow_v1.py) kept for reference.
 
+### 2. FortiGate Packet Sniffer (`diag_fgt_sniffer_ssh_standalone_v2.py`)
+- Script: [FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py)
+- Purpose: capture live packets across one or more FortiGate firewalls using `diagnose sniffer packet`, stream color-coded console logs, automatically generate Wireshark `.pcap` files, and export structured JSON.
+- Wireshark Integration: Point to any Wireshark installation directory with auto-detect and validation, automatic PCAP conversion on capture, and a standalone "Convert Log to PCAP" tool for converting past captures.
+- Runtime requirements: Python with Tkinter available, `paramiko`, `cryptography`, and Wireshark (`text2pcap`).
+- Previous versions: [v1](FortiNet/FortiOS/Standalone/archived/diag_fgt_sniffer_ssh_standalone_v1.py) kept for reference.
+
 ## How to run
 
 ```bash
+# FortiGate Debug Flow utility
 python FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v3.py
+
+# FortiGate Packet Sniffer utility
+python FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py
 ```
 
 The GUI collects:
@@ -57,6 +69,17 @@ Resolved in v2:
 - **Hover help text** now explains every GUI field, checkbox, and button.
 - **SSH host keys are trusted automatically on first connection** and persisted to a local `known_hosts` file. A host key that changes on a later connection is rejected instead of silently accepted.
 
+### FortiGate Packet Sniffer v2 ([diag_fgt_sniffer_ssh_standalone_v2.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py)):
+
+- **Paramiko Worker Architecture**: Standardized on pure synchronous Paramiko worker threads per firewall, eliminating Tkinter async event-loop collisions and aligning with workspace standards.
+- **Wireshark Path Configuration & PCAP Conversion**: Added an explicit Wireshark installation folder entry with auto-detection fallback, Browse picker, path validation badge, automatic PCAP conversion during live runs, and a standalone "Convert Log to PCAP" button to convert past captures. Fixed timestamp format alignment with `%Y-%m-%d %H:%M:%S.` so text2pcap executes cleanly with zero timestamp errors.
+- **Requirements Check & Auto-Installer**: Integrated dependency check on startup for `paramiko`, `cryptography`, and Wireshark `text2pcap`, complete with a one-click GUI installer.
+- **Dark Console Live View with Whole-Line Host Colors**: High-contrast dark console terminal (`Consolas` on black) with vibrant 10-color whole-line coloring per host and color-tagged log levels (`info`, `warning`, `error`). Complete line buffering across SSH receive chunks ensures packet headers and hex dumps are never fragmented.
+- **Structured JSON Sniffer Export**: Parses packet headers and hex payloads into structured 5-tuples, interface direction, protocols, and payload data. Exports Per-Host JSON, Combined Multi-Host JSON, and GUI live-filtered JSON.
+- **100% AES-256-GCM Encrypted Profiles**: All targets, credentials, filter settings, and paths are encrypted using authenticated AES-256-GCM with PBKDF2-HMAC-SHA256 key derivation.
+- **Strict Host-Key Checking & Known Hosts Manager**: Strict host-key verification wizard and known hosts manager to guard against MITM attacks.
+- **Live Boolean & Regex Filter Chaining**: Real-time log searching (`Show Matching`, `Hide Matching`, `Clear Filter`) supporting `AND`, `OR`, `NOT`, quotes, and parentheses.
+
 Possible future ideas (not yet implemented):
 
 - A GUI "Compare Traces" tool to side-by-side view traces from different hosts to spot divergent behavior.
@@ -80,4 +103,4 @@ Commercial deployment across organizations with multiple named users requires an
 | **Large Business** | 101 – 500 Named Users | Annual Subscription | GitHub Discussions / Issues |
 | **Enterprise** | 501+ Named Users | Custom Enterprise Agreement | GitHub Discussions / Issues |
 
-For purchasing inquiries or commercial license quotes, please open a thread in **GitHub Discussions** or submit an inquiry via **GitHub Issues**.
+For purchasing inquiries or commercial license quotes, please open a thread in **GitHub Discussions** or submit an inquiry via **GitHub Issues**.
