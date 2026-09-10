@@ -238,6 +238,7 @@ class DebugFlowSshArgs:
     sport_to: int | None = None
     sport_negate: bool = False
     proto: int | None = None
+    proto_negate: bool = False
     show_function_name: bool = True
     show_iprope: bool = True
     console_timestamp: bool = True
@@ -336,6 +337,8 @@ def build_filter_commands(args: DebugFlowSshArgs) -> list[str]:
             commands.append(f"diagnose debug flow filter negate {cli_name}")
     if args.proto is not None:
         commands.append(f"diagnose debug flow filter proto {args.proto}")
+        if args.proto_negate:
+            commands.append("diagnose debug flow filter negate proto")
     commands.append("diagnose debug flow show function-name enable" if args.show_function_name else "diagnose debug flow show function-name disable")
     commands.append("diagnose debug flow show iprope enable" if args.show_iprope else "diagnose debug flow show iprope disable")
     if args.console_timestamp:
@@ -358,7 +361,8 @@ def active_filters(args: DebugFlowSshArgs) -> list[str]:
         else:
             values.append(f"{prefix}{name}={start_value if start_value is not None else end_value}")
     if args.proto is not None:
-        values.append(f"proto={args.proto}")
+        prefix = "NOT " if args.proto_negate else ""
+        values.append(f"{prefix}proto={args.proto}")
     return values
 
 
@@ -1106,6 +1110,7 @@ def save_session_profile(
         "sport_to": args.sport_to,
         "sport_negate": args.sport_negate,
         "proto": args.proto,
+        "proto_negate": args.proto_negate,
         "show_function_name": args.show_function_name,
         "show_iprope": args.show_iprope,
         "console_timestamp": args.console_timestamp,
@@ -1499,15 +1504,18 @@ class RunCoordinator:
     def __init__(self) -> None:
         self.trace_stop_event = threading.Event()
         self.trace_stop_host: str | None = None
+        self.trace_stop_reason: str = ""
         self._lock = threading.Lock()
 
-    def claim_trace_stop(self, host: str) -> bool:
+    def claim_trace_stop(self, host: str, reason: str = "") -> bool:
         """Record which host first reached its trace count. Returns True only
         for the first caller, so only that host is recorded as the cause."""
         with self._lock:
             if self.trace_stop_event.is_set():
                 return False
             self.trace_stop_host = host
+            if reason:
+                self.trace_stop_reason = reason
             self.trace_stop_event.set()
             return True
 
@@ -1544,6 +1552,9 @@ class SshDebugSession:
         self.start_trace_id: int | None = None
         self.target_trace_id: int | None = None
         self.trace_count_reached = False
+        self.seen_trace_ids: set[int] = set()
+        self.target_trace_seen = False
+        self.target_trace_last_line_at = 0.0
         self.stop_reason = "n/a"
         self._line_buffer = ""
 
@@ -1641,6 +1652,9 @@ class SshDebugSession:
         trace_id = extract_trace_id(line)
         if trace_id is None:
             return
+
+        self.seen_trace_ids.add(trace_id)
+
         if self.start_trace_id is None:
             self.start_trace_id = trace_id
             self.target_trace_id = trace_id + self.args.num_packets - 1
@@ -1649,18 +1663,24 @@ class SshDebugSession:
                 f"First trace_id observed: {trace_id}. Session will stop once "
                 f"trace_id {self.target_trace_id} finishes ({self.args.num_packets} trace(s) requested).",
             )
-            return
-        if trace_id > self.target_trace_id:
+
+        # If a trace beyond target is seen, or distinct count exceeded, target trace is definitely complete
+        if (self.target_trace_id is not None and trace_id > self.target_trace_id) or len(self.seen_trace_ids) > self.args.num_packets:
             self.trace_count_reached = True
-            first = self.coordinator.claim_trace_stop(self.host)
+            captured = len(self.seen_trace_ids)
             reason = (
-                f"Requested trace count reached (trace_id {trace_id}, "
-                f"target was {self.target_trace_id})."
+                f"Requested trace count reached ({captured}/{self.args.num_packets} trace(s) captured, "
+                f"trace_id {trace_id} observed after target {self.target_trace_id})."
             )
             self.log(LOG_INFO, reason)
-            if first:
-                self.coordinator.trace_stop_reason = reason
+            self.coordinator.claim_trace_stop(self.host, reason)
             self.send_ctrl_c(reason)
+            return
+
+        # If target trace is reached (by target_trace_id or count), mark it seen and update timestamp
+        if (self.target_trace_id is not None and trace_id >= self.target_trace_id) or len(self.seen_trace_ids) >= self.args.num_packets:
+            self.target_trace_seen = True
+            self.target_trace_last_line_at = time.monotonic()
 
     def _handle_complete_line(self, line: str) -> None:
         stripped = line.rstrip("\r")
@@ -1767,15 +1787,32 @@ class SshDebugSession:
             while not self.stop_requested.is_set():
                 self.drain_channel()
                 if self.trace_count_reached:
+                    captured_count = len(self.seen_trace_ids) if self.seen_trace_ids else self.args.num_packets
                     reason = (
                         f"Stopped by trace count (trace_id {self.start_trace_id}-{self.target_trace_id}, "
-                        f"{self.args.num_packets} trace(s) requested)."
+                        f"{captured_count} trace(s) captured)."
                     )
                     self.log(LOG_INFO, reason)
                     self.send_ctrl_c(reason)
                     break
+                if self.target_trace_seen and not self.trace_count_reached:
+                    # Give trailing lines of the target trace 350ms of quiet channel to finish arriving
+                    if time.monotonic() - self.target_trace_last_line_at >= 0.35:
+                        self.trace_count_reached = True
+                        captured_count = len(self.seen_trace_ids) if self.seen_trace_ids else self.args.num_packets
+                        reason = (
+                            f"Requested trace count reached ({captured_count}/{self.args.num_packets} trace(s) captured, "
+                            f"target trace_id {self.target_trace_id} finished)."
+                        )
+                        self.log(LOG_INFO, reason)
+                        self.coordinator.claim_trace_stop(self.host, reason)
+                        self.send_ctrl_c(reason)
+                        break
                 if self.coordinator.trace_stop_event.is_set():
-                    reason = f"Stopped by {self.coordinator.trace_stop_host} (that host reached its trace count first)."
+                    reason = (
+                        f"Stopped by {self.coordinator.trace_stop_host} "
+                        f"({self.coordinator.trace_stop_reason or 'that host reached its trace count first'})."
+                    )
                     self.log(LOG_INFO, reason)
                     self.send_ctrl_c(reason)
                     break
@@ -1788,10 +1825,12 @@ class SshDebugSession:
                     self.log(LOG_INFO, reason)
                     self.send_ctrl_c(reason)
                     break
-                time.sleep(0.25)
+                time.sleep(0.1)
             self.drain_channel()
             self.cleanup_remote_debug()
             time.sleep(0.5)
+            self.drain_channel()
+            self.flush_line_buffer()
             self.drain_channel()
             self.flush_line_buffer()
         except Exception as exc:
@@ -2344,8 +2383,11 @@ class DebugFlowSshGui:
         proto_label.grid(row=proto_row, column=0, sticky="w", padx=(4, 6), pady=2)
         proto_entry = ttk.Entry(filter_fields, textvariable=self.str_var("proto"), width=10)
         proto_entry.grid(row=proto_row, column=1, sticky="w", padx=(0, 4), pady=2)
+        proto_negate_cb = ttk.Checkbutton(filter_fields, text="Not", variable=self.bool_var("proto_negate", False))
+        proto_negate_cb.grid(row=proto_row, column=4, sticky="w", padx=(6, 4), pady=2)
         ToolTip(proto_label, FIELD_HELP["proto"])
         ToolTip(proto_entry, FIELD_HELP["proto"])
+        ToolTip(proto_negate_cb, FIELD_HELP["negate"])
 
         actions = ttk.Frame(self.content_frame)
         actions.grid(row=4, column=0, sticky="ew", padx=4, pady=4)
@@ -2664,6 +2706,7 @@ class DebugFlowSshGui:
         
         # Protocol filter
         self.vars["proto"].set(str(profile_data.get("proto", "")) if profile_data.get("proto") else "")
+        self.vars["proto_negate"].set(profile_data.get("proto_negate", False))
         
         # Output options
         self.vars["save_text_output"].set(profile_data.get("save_text_output", True))
@@ -2871,6 +2914,7 @@ class DebugFlowSshGui:
             sport_to=validate_port("sport_to", self.vars["sport_to"].get()),
             sport_negate=bool(self.vars["sport_negate"].get()),
             proto=validate_proto(self.vars["proto"].get()),
+            proto_negate=bool(self.vars["proto_negate"].get()),
             show_function_name=bool(self.vars["show_function_name"].get()),
             show_iprope=bool(self.vars["show_iprope"].get()),
             console_timestamp=bool(self.vars["console_timestamp"].get()),
