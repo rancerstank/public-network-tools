@@ -10,12 +10,12 @@ This repository contains a small set of standalone utilities for network adminis
 - Runtime requirements: Python with Tkinter available, `paramiko` (for SSH), and `cryptography` (for AES-256-GCM encrypted profiles). Missing packages can be installed directly from the GUI via the "Check / Install Requirements" button.
 - Previous versions: [v2](FortiNet/FortiOS/Standalone/archived/diag_fgt_debug_flow_v2.py), [v1](FortiNet/FortiOS/Standalone/archived/diag_fgt_debug_flow_v1.py) kept for reference.
 
-### 2. FortiGate Packet Sniffer (`diag_fgt_sniffer_ssh_standalone_v2.py`)
-- Script: [FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py)
-- Purpose: capture live packets across one or more FortiGate firewalls using `diagnose sniffer packet`, stream color-coded console logs, automatically generate Wireshark `.pcap` files, and export structured JSON.
-- Wireshark Integration: Point to any Wireshark installation directory with auto-detect and validation, automatic PCAP conversion on capture, and a standalone "Convert Log to PCAP" tool for converting past captures.
+### 2. FortiGate Packet Sniffer & PCAP Tool (`diag_fgt_sniffer_pcap_v3.py`)
+- Script: [FortiNet/FortiOS/Standalone/diag_fgt_sniffer_pcap_v3.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_pcap_v3.py)
+- Purpose: capture live packets across one or more FortiGate firewalls using `diagnose sniffer packet`, stream color-coded console logs, automatically generate per-host and combined chronological Wireshark `.pcap` files, and export structured JSON.
+- Wireshark Integration: Point to any Wireshark installation directory with auto-detect and validation, automatic per-host and combined PCAP conversion on capture, and a standalone "Convert Log to PCAP" tool for converting past captures.
 - Runtime requirements: Python with Tkinter available, `paramiko`, `cryptography`, and Wireshark (`text2pcap`).
-- Previous versions: [v1](FortiNet/FortiOS/Standalone/archived/diag_fgt_sniffer_ssh_standalone_v1.py) kept for reference.
+- Previous versions: [v2](FortiNet/FortiOS/Standalone/archived/diag_fgt_sniffer_ssh_standalone_v2.py), [v1](FortiNet/FortiOS/Standalone/archived/diag_fgt_sniffer_ssh_standalone_v1.py) kept for reference.
 
 ## How to run
 
@@ -23,8 +23,8 @@ This repository contains a small set of standalone utilities for network adminis
 # FortiGate Debug Flow utility
 python FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v3.py
 
-# FortiGate Packet Sniffer utility
-python FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py
+# FortiGate Packet Sniffer & PCAP utility
+python FortiNet/FortiOS/Standalone/diag_fgt_sniffer_pcap_v3.py
 ```
 
 The GUI collects:
@@ -69,7 +69,21 @@ Resolved in v2:
 - **Hover help text** now explains every GUI field, checkbox, and button.
 - **SSH host keys are trusted automatically on first connection** and persisted to a local `known_hosts` file. A host key that changes on a later connection is rejected instead of silently accepted.
 
-### FortiGate Packet Sniffer v2 ([diag_fgt_sniffer_ssh_standalone_v2.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_ssh_standalone_v2.py)):
+### FortiGate Packet Sniffer & PCAP Tool v3 ([diag_fgt_sniffer_pcap_v3.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_pcap_v3.py)):
+
+- **Chronological Combined Text Output**: A new checkbox **"Save Combined Text (.txt)"** generates a single consolidated capture file (`combined_ssh_sniffer_<label>_<timestamp>.txt`) interleaving packet blocks from all targeted firewalls in exact ascending chronological order, complete with per-device provenance (`[hostname]`).
+- **Combined Multi-Device PCAP Generation**: A new checkbox **"Create Combined PCAP (.pcap)"** converts the sorted chronological multi-device text capture directly into a single Wireshark `.pcap` file (`combined_ssh_sniffer_<label>_<timestamp>.pcap`). Network engineers can inspect transit flows across multiple firewall boundaries in a single Wireshark timeline.
+- **Streamlined Symmetrical Output Options (3x3 Layout)**:
+  - **Per-Host Row**: *Save Text Output (.txt)*, *Create PCAP (.pcap)*, *Save JSON (.json)*.
+  - **Combined Row**: *Save Combined Text (.txt)*, *Create Combined PCAP (.pcap)*, *Combined JSON (.json)*.
+- **Strict Reactive Checkbox Interlocking**:
+  - Unchecking *Save Text Output* automatically locks out *Create PCAP*.
+  - Unchecking *Save Combined Text* automatically locks out *Create Combined PCAP*.
+  - Per-Host and Combined JSON operate as independent, non-locking toggles.
+- **High-Volume GUI Responsiveness Optimization**: Decoupled Tkinter log drainage with a 200-line batch cap and deferred `see("end")` redraw, completely eliminating GUI freezes during high-throughput sniffer bursts at verbose level 6.
+- **AES-256-GCM Profile Persistence**: Fully persists and restores all 6 output format preferences within master-passphrase encrypted session profiles.
+
+### FortiGate Packet Sniffer v2 ([archived/diag_fgt_sniffer_ssh_standalone_v2.py](FortiNet/FortiOS/Standalone/archived/diag_fgt_sniffer_ssh_standalone_v2.py)):
 
 - **Paramiko Worker Architecture**: Standardized on pure synchronous Paramiko worker threads per firewall, eliminating Tkinter async event-loop collisions and aligning with workspace standards.
 - **Wireshark Path Configuration & PCAP Conversion**: Added an explicit Wireshark installation folder entry with auto-detection fallback, Browse picker, path validation badge, automatic PCAP conversion during live runs, and a standalone "Convert Log to PCAP" button to convert past captures. Fixed timestamp format alignment with `%Y-%m-%d %H:%M:%S.` so text2pcap executes cleanly with zero timestamp errors.
