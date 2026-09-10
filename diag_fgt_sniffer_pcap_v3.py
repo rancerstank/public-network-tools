@@ -66,7 +66,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Callable, Any
 
 try:
@@ -375,37 +375,78 @@ def create_pcap_file(text_path: str, text2pcap_exe: str | None = None) -> tuple[
 
 
 
-def parse_packet_timestamp_sort_key(ts_str: str) -> tuple[int, float | str]:
-    """Parse a timestamp string into a sortable key tuple."""
-    ts_clean = ts_str.strip()
+# ==============================================================================
+# Chronological Sorting & Interleaving Helpers
+# ==============================================================================
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+TS_PATTERN = (
+    r"(?P<timestamp>"
+    r"(?:\d{4}[-/]\d{2}[-/]\d{2}|\d{2}/\d{2}/\d{4})\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?"
+    r"|\d{1,2}:\d{2}:\d{2}(?:\.\d+)?"
+    r"|\d+\.\d+"
+    r")"
+)
+
+TIMESTAMP_HEADER_RE = re.compile(
+    r"^(?:\[(?P<host>[^\]]+)\]\s+)?"
+    + TS_PATTERN
+    + r"(?:\s+(?P<rest>.*))?$"
+)
+
+
+def parse_packet_timestamp_sort_key(ts_str: str, base_epoch: float = 0.0) -> float:
+    """Parse a timestamp string into a float epoch timestamp for chronological sorting.
+    
+    Handles:
+      - Absolute dates: YYYY-MM-DD, YYYY/MM/DD, MM/DD/YYYY, DD/MM/YYYY with HH:MM:SS(.ffffff)
+      - Time-only: HH:MM:SS(.ffffff) anchored to today's date (or base_epoch's date)
+      - Relative seconds: float offset anchored to base_epoch (session start time)
+    """
+    ts_clean = ANSI_ESCAPE_RE.sub("", ts_str).strip()
+    if not ts_clean:
+        return base_epoch
+
     for fmt in (
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S.%f",
+        "%Y/%m/%d %H:%M:%S",
         "%m/%d/%Y %H:%M:%S.%f",
         "%m/%d/%Y %H:%M:%S",
         "%d/%m/%Y %H:%M:%S.%f",
         "%d/%m/%Y %H:%M:%S",
     ):
         try:
-            dt = datetime.strptime(ts_clean, fmt)
-            return (0, dt.timestamp())
+            return datetime.strptime(ts_clean, fmt).timestamp()
         except ValueError:
             pass
+
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+        try:
+            t = datetime.strptime(ts_clean, fmt).time()
+            base_date = datetime.fromtimestamp(base_epoch).date() if base_epoch > 0 else date.today()
+            return datetime.combine(base_date, t).timestamp()
+        except ValueError:
+            pass
+
     try:
         val = float(ts_clean)
-        return (0, val)
+        return (base_epoch if base_epoch > 0 else 0.0) + val
     except ValueError:
         pass
-    return (1, ts_clean)
+
+    return base_epoch
 
 
-def parse_packet_blocks(raw_text: str, host: str = "") -> list[dict[str, Any]]:
+def parse_packet_blocks(raw_text: str, host: str = "", base_epoch: float = 0.0) -> list[dict[str, Any]]:
     """Extract discrete packet records from FortiOS sniffer text output for chronological merging."""
     packets = []
     current_pkt = None
     packet_index = 0
     for raw_line in raw_text.splitlines():
-        line = raw_line.rstrip("\r\n")
+        line = ANSI_ESCAPE_RE.sub("", raw_line).rstrip("\r\n")
         stripped = line.strip()
         if not stripped:
             continue
@@ -416,10 +457,11 @@ def parse_packet_blocks(raw_text: str, host: str = "") -> list[dict[str, Any]]:
             ts = m.group("timestamp")
             line_host = m.group("host") or host
             packet_index += 1
+            sort_ts = parse_packet_timestamp_sort_key(ts, base_epoch=base_epoch)
             current_pkt = {
                 "host": line_host,
                 "timestamp_str": ts,
-                "sort_key": (parse_packet_timestamp_sort_key(ts), line_host, packet_index),
+                "sort_key": (sort_ts, line_host, packet_index),
                 "lines": [stripped],
             }
         elif current_pkt:
@@ -429,15 +471,21 @@ def parse_packet_blocks(raw_text: str, host: str = "") -> list[dict[str, Any]]:
     return packets
 
 
-def merge_sniffer_texts_chronologically(session_outputs: list[tuple[str, str]]) -> tuple[str, int]:
+def merge_sniffer_texts_chronologically(session_outputs: list[tuple[Any, ...]]) -> tuple[str, int]:
     """Merge sniffer outputs from multiple hosts into a single chronologically sorted text stream.
     
     Each packet block is prepended with '[hostname] ' if not already tagged, ensuring clear
     device provenance while remaining 100% compatible with normalize_for_text2pcap().
+    Accepts list of (host, raw_text) or (host, raw_text, base_epoch).
     """
     all_packets = []
-    for host, raw_text in session_outputs:
-        all_packets.extend(parse_packet_blocks(raw_text, host=host))
+    for item in session_outputs:
+        if len(item) == 3:
+            host, raw_text, base_epoch = item
+        else:
+            host, raw_text = item
+            base_epoch = 0.0
+        all_packets.extend(parse_packet_blocks(raw_text, host=host, base_epoch=base_epoch))
     
     all_packets.sort(key=lambda p: p["sort_key"])
     
@@ -657,12 +705,6 @@ def split_ip_port(endpoint: str) -> tuple[str, int | None]:
     return endpoint, None
 
 
-TIMESTAMP_HEADER_RE = re.compile(
-    r"^(?:\[(?P<host>[^\]]+)\]\s+)?"
-    r"(?P<timestamp>(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d+\.\d+)\s+"
-    r"(?P<rest>.*)$"
-)
-
 IFACE_DIR_RE = re.compile(
     r"^(?P<interface>[a-zA-Z0-9._-]+)\s+(?P<direction>in|out)\s+(?P<body>.*)$"
 )
@@ -682,6 +724,7 @@ def parse_sniffer_text(
     interface: str | None = None,
     filter_expr: str | None = None,
     verbose: int | None = None,
+    base_epoch: float = 0.0,
 ) -> dict[str, Any]:
     """Parse raw FortiOS sniffer output into structured JSON containing individual packet metadata and hex payloads."""
     packets: list[dict[str, Any]] = []
@@ -699,7 +742,7 @@ def parse_sniffer_text(
             current_pkt = None
 
     for raw_line in raw_text.splitlines():
-        line = raw_line.strip()
+        line = ANSI_ESCAPE_RE.sub("", raw_line).strip()
         if not line:
             continue
 
@@ -749,10 +792,14 @@ def parse_sniffer_text(
             elif "arp" in pkt_body.lower():
                 proto_name = "ARP"
 
+            ts_val = gd.get("timestamp") or ""
+            sort_epoch = parse_packet_timestamp_sort_key(ts_val, base_epoch=base_epoch)
+
             current_pkt = {
                 "packet_number": len(packets) + 1,
                 "host": line_host,
-                "timestamp": gd.get("timestamp"),
+                "timestamp": ts_val,
+                "_sort_timestamp": sort_epoch,
                 "interface": pkt_iface,
                 "direction": pkt_direction,
                 "src_ip": src_ip,
@@ -782,7 +829,7 @@ def parse_sniffer_text(
 
     return {
         "metadata": {
-            "generator": "diag_fgt_sniffer_ssh_standalone_v2",
+            "generator": "diag_fgt_sniffer_pcap_v3",
             "exported_at": datetime.now().isoformat(),
             "total_packets": len(packets),
             "host": host,
@@ -804,6 +851,8 @@ def export_sniffer_to_json(
 ) -> str:
     """Parse sniffer text and serialize to structured JSON string, optionally writing to disk."""
     data = parse_sniffer_text(raw_text, host=host, interface=interface, filter_expr=filter_expr, verbose=verbose)
+    for pkt in data.get("packets", []):
+        pkt.pop("_sort_timestamp", None)
     json_str = json.dumps(data, indent=2)
     if output_path is not None:
         _write_text(output_path, json_str)
@@ -1538,11 +1587,16 @@ class SshSnifferSession:
         self.result_pcap_file: str | None = None
         self.result_json_file: str | None = None
         self.started_at = 0.0
+        self.started_wall_time = 0.0
         self.ended_at = 0.0
         self.packet_count = 0
         self.stop_reason = "n/a"
         self._line_buffer = ""
-        self._packet_pattern = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\b")
+        self._packet_pattern = re.compile(
+            r"\b(?:\d{4}[-/]\d{2}[-/]\d{2}|\d{2}/\d{2}/\d{4})\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b"
+            r"|\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b"
+            r"|\b\d+\.\d{6}\b"
+        )
 
     def log(self, level: str, message: str, kind: str = LOG_KIND_PROGRAM) -> None:
         self.logger(level, f"[{self.host}] {message}", kind)
@@ -1715,7 +1769,10 @@ class SshSnifferSession:
                     interface=self.args.interface,
                     filter_expr=build_sniffer_filter(self.args),
                     verbose=self.args.verbose,
+                    base_epoch=self.started_wall_time,
                 )
+                for pkt in parsed.get("packets", []):
+                    pkt.pop("_sort_timestamp", None)
                 parsed["metadata"]["elapsed_seconds"] = round(elapsed, 2)
                 parsed["metadata"]["stop_reason"] = self.stop_reason
                 parsed["metadata"]["packet_count_requested"] = self.args.count
@@ -1727,6 +1784,7 @@ class SshSnifferSession:
 
     def run(self) -> None:
         self.started_at = time.monotonic()
+        self.started_wall_time = time.time()
         try:
             self.connect()
             cmd = build_sniffer_command(self.args)
@@ -2961,7 +3019,10 @@ class SnifferSshGui:
         ts = timestamp_token()
         path = os.path.join(args.output_dir, f"combined_ssh_sniffer_{safe_label}_{ts}.txt")
         
-        session_outputs = [(s.host, "".join(s.output_chunks)) for s in self.sessions]
+        session_outputs = [
+            (s.host, "".join(s.output_chunks), getattr(s, "started_wall_time", 0.0))
+            for s in self.sessions
+        ]
         merged_content, total_pkts = merge_sniffer_texts_chronologically(session_outputs)
         
         elapsed_list = [s.ended_at - s.started_at for s in self.sessions if s.ended_at and s.started_at]
@@ -3034,12 +3095,14 @@ class SnifferSshGui:
 
         for session in self.sessions:
             full_text = "".join(session.output_chunks)
+            base_ep = getattr(session, "started_wall_time", 0.0)
             parsed = parse_sniffer_text(
                 full_text,
                 host=session.host,
                 interface=args.interface,
                 filter_expr=build_sniffer_filter(args),
                 verbose=args.verbose,
+                base_epoch=base_ep,
             )
             pkts = parsed.get("packets", [])
             all_packets.extend(pkts)
@@ -3050,6 +3113,12 @@ class SnifferSshGui:
                 "stop_reason": session.stop_reason,
                 "error": session.error_text or None,
             }
+
+        # Strictly sort all combined packets chronologically across hosts
+        all_packets.sort(key=lambda p: (p.get("_sort_timestamp", 0.0), p.get("host", "")))
+        for idx, pkt in enumerate(all_packets, start=1):
+            pkt["packet_number"] = idx
+            pkt.pop("_sort_timestamp", None)
 
         payload = {
             "metadata": {
