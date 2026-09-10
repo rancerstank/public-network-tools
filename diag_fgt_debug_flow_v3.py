@@ -378,7 +378,6 @@ def extract_trace_id(line: str) -> int | None:
     return int(match.group(1))
 
 
-
 class BooleanRegexFilter:
     """Evaluates boolean logic expressions over regex patterns for live output filtering.
     
@@ -1543,7 +1542,6 @@ class RunCoordinator:
             return True
 
 
-
 # The worker session object represents one SSH connection to a single FortiGate.
 # It owns the Paramiko client/channel, sends the debug-flow commands, captures
 # the live output stream, and writes a final text report after the session ends.
@@ -1689,23 +1687,29 @@ class SshDebugSession:
             self.log(
                 LOG_INFO,
                 f"First trace_id observed: {trace_id}. Session will stop once "
-                f"{self.args.num_packets} trace(s) are captured.",
+                f"trace_id {self.target_trace_id} finishes ({self.args.num_packets} trace(s) requested).",
             )
 
         if (
-            self.packet_count >= self.args.num_packets
+            (self.target_trace_id is not None and trace_id >= self.target_trace_id)
+            or self.packet_count >= self.args.num_packets
             or len(self.seen_trace_ids) >= self.args.num_packets
         ):
             self.trace_count_reached = True
             captured = max(len(self.seen_trace_ids), self.packet_count)
+            target_str = (
+                f"target trace_id {self.target_trace_id}"
+                if self.target_trace_id is not None
+                else f"target count {self.args.num_packets}"
+            )
             reason = (
-                f"Requested trace count reached ({captured}/{self.args.num_packets} trace(s) captured)."
+                f"Requested trace count reached ({captured}/{self.args.num_packets} trace(s) captured, "
+                f"trace_id {trace_id} observed for {target_str})."
             )
             self.log(LOG_INFO, reason)
             self.coordinator.claim_trace_stop(self.host, reason)
             self.send_ctrl_c(reason)
             return
-
 
     def _handle_complete_line(self, line: str) -> None:
         stripped = line.rstrip("\r")
@@ -1845,7 +1849,6 @@ class SshDebugSession:
                     self.send_ctrl_c(reason)
                     break
                 time.sleep(0.1)
-
             self.drain_channel()
             self.cleanup_remote_debug()
             time.sleep(0.5)
@@ -2979,7 +2982,6 @@ class DebugFlowSshGui:
         ]
         coordinator.set_sessions(self.sessions)
         self.threads = []
-
         self.report_lines = []
         self.set_running_state(True)
         self.logger(LOG_INFO, f"Starting SSH debug flow on {len(self.sessions)} host(s).")
