@@ -5,12 +5,14 @@ This repository contains a small set of standalone utilities for network adminis
 ## Main Tools
 
 ### 1. FortiGate Debug Flow (`diag_fgt_debug_flow_v3.py`)
+<img width="1122" height="1236" alt="flow2" src="https://github.com/user-attachments/assets/f24e2350-f540-47cc-ac9a-cd05ab9adcfa" />
 - Script: [FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v3.py](FortiNet/FortiOS/Standalone/diag_fgt_debug_flow_v3.py)
 - Purpose: run FortiOS debug-flow traces over SSH, apply optional filters, and capture the session output for later review.
 - Runtime requirements: Python with Tkinter available, `paramiko` (for SSH), and `cryptography` (for AES-256-GCM encrypted profiles). Missing packages can be installed directly from the GUI via the "Check / Install Requirements" button.
 - Previous versions: [v2](FortiNet/FortiOS/Standalone/archived/diag_fgt_debug_flow_v2.py), [v1](FortiNet/FortiOS/Standalone/archived/diag_fgt_debug_flow_v1.py) kept for reference.
 
 ### 2. FortiGate Packet Sniffer & PCAP Tool (`diag_fgt_sniffer_pcap_v3.py`)
+<img width="1120" height="1238" alt="snif2" src="https://github.com/user-attachments/assets/2460da0d-2a73-4e30-802a-31cea1bd574a" />
 - Script: [FortiNet/FortiOS/Standalone/diag_fgt_sniffer_pcap_v3.py](FortiNet/FortiOS/Standalone/diag_fgt_sniffer_pcap_v3.py)
 - Purpose: capture live packets across one or more FortiGate firewalls using `diagnose sniffer packet`, stream color-coded console logs, automatically generate per-host and combined chronological Wireshark `.pcap` files, and export structured JSON.
 - Wireshark Integration: Point to any Wireshark installation directory with auto-detect and validation, automatic per-host and combined PCAP conversion on capture, and a standalone "Convert Log to PCAP" tool for converting past captures.
